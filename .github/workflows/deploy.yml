@@ -36,10 +36,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          flutter build web --release --base-href "/gym-command-center/" --no-tree-shake-icons \\
-            --dart-define=SUPABASE_URL="$SUPABASE_URL" \\
-            --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY"
+        run: flutter build web --release --base-href "/gym-command-center/" --no-tree-shake-icons --dart-define=SUPABASE_URL="$SUPABASE_URL" --dart-define=SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
