@@ -9,8 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  cupertino_icons: ^1.0.8
   font_awesome_flutter: ^11.0.0
-  image_gallery_saver_plus: ^5.1.1
   mobile_scanner: ^7.4.2
   path_provider: ^2.1.6
   qr_flutter: ^4.1.0
