@@ -32,6 +32,20 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      - name: Verify Supabase build configuration
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::error::Missing GitHub Actions secret SUPABASE_URL."
+            exit 1
+          fi
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::Missing GitHub Actions secret SUPABASE_ANON_KEY."
+            exit 1
+          fi
+          echo "Supabase build variables are present."
       - name: Build web
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
