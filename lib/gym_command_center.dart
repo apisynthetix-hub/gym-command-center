@@ -82,6 +82,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   String exerciseFilter = 'TODOS';
 
   bool loadingData = true;
+  final List<String> _supabaseReadErrors = [];
 
   List<Map<String, dynamic>> transactions = [];
   List<double> monthlyIncome = List<double>.filled(12, 0);
@@ -295,7 +296,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       debugPrint('📦 Miembros recibidos: ${response.length}');
 
-      if (response.isNotEmpty) {
+      {
         final loaded = <Map<String, dynamic>>[];
         for (final row in response) {
           loaded.add({
@@ -323,6 +324,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     } catch (e) {
+      _supabaseReadErrors.add('members');
       debugPrint('❌ Error loading members: $e');
     }
   }
@@ -431,8 +433,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       }
 
       if (!mounted) return;
-      if (loaded.isNotEmpty) {
-        setState(() {
+      setState(() {
           transactions = loaded;
           monthlyIncome = calcMonthly;
           paymentMethods = calcMethods;
@@ -440,9 +441,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           weeklyExpense = [0, 0, 0, 0];
           topPlans = loadedTopPlans;
           income = totalIngresos;
-        });
-      }
+      });
     } catch (e) {
+      _supabaseReadErrors.add('payments');
       debugPrint('❌ Error loading payments: $e');
     }
   }
@@ -458,7 +459,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       debugPrint('📦 Planes recibidos: ${response.length}');
 
-      if (response.isNotEmpty) {
+      {
         final loaded = <Map<String, dynamic>>[];
         for (final row in response) {
           loaded.add({
@@ -477,6 +478,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     } catch (e) {
+      _supabaseReadErrors.add('plans');
       debugPrint('❌ Error loading plans: $e');
     }
   }
@@ -493,7 +495,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       debugPrint('📦 Actividades recibidas: ${response.length}');
 
-      if (response.isNotEmpty) {
+      {
         final loaded = <Map<String, String>>[];
         for (final row in response) {
           final createdAt =
@@ -513,6 +515,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     } catch (e) {
+      _supabaseReadErrors.add('activities');
       debugPrint('❌ Error loading activities: $e');
     }
   }
@@ -562,6 +565,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       debugPrint(
           '✅ Aforo: $entradas entradas - $salidas salidas = $finalInside');
     } catch (e) {
+      _supabaseReadErrors.add('checkins');
       debugPrint('❌ Error cargando checkins: $e');
       if (mounted) {
         setState(() => loadingCheckins = false);
@@ -580,6 +584,24 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   Future<void> _syncWithSupabase() async {
     debugPrint('🔄 Iniciando conexión con Supabase...');
 
+    if (!SupabaseConfig.isConfigured) {
+      debugPrint('⚠️ Faltan SUPABASE_URL o SUPABASE_ANON_KEY en la compilación.');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Base de datos no configurada: revisa los secretos SUPABASE_URL y SUPABASE_ANON_KEY en GitHub Actions.',
+            ),
+            duration: Duration(seconds: 10),
+            backgroundColor: kRed,
+          ),
+        );
+      }
+      return;
+    }
+
+    _supabaseReadErrors.clear();
+
     try {
       Supabase.instance.client;
       debugPrint('✅ Supabase ya estaba inicializado');
@@ -595,7 +617,18 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         await Future.delayed(const Duration(milliseconds: 500));
       } catch (e) {
         debugPrint('❌ Error al inicializar Supabase: $e');
-        debugPrint('⚠️ Modo offline activo.');
+        debugPrint('⚠️ No se pudo iniciar Supabase.');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'No se pudo iniciar Supabase. Verifica la URL y la clave pública configuradas en GitHub Actions.',
+              ),
+              duration: Duration(seconds: 10),
+              backgroundColor: kRed,
+            ),
+          );
+        }
         return;
       }
     }
@@ -613,7 +646,16 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
 
     if (!supabaseReady) {
-      debugPrint('⚠️ Supabase no está listo. Modo offline.');
+      debugPrint('⚠️ Supabase no está listo.');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Supabase no respondió. Revisa la conexión e inténtalo de nuevo.'),
+            duration: Duration(seconds: 8),
+            backgroundColor: kRed,
+          ),
+        );
+      }
       return;
     }
 
@@ -648,7 +690,21 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
 
     await _saveLocalData();
-    debugPrint('✅ Sincronización completa');
+    debugPrint('✅ Sincronización finalizada');
+
+    if (mounted) {
+      final failedTables = _supabaseReadErrors.toSet().toList();
+      final message = failedTables.isEmpty
+          ? 'Conexión con Supabase correcta. Datos sincronizados.'
+          : 'Supabase conecta, pero no se pudieron leer: ${failedTables.join(', ')}. Revisa las tablas y sus permisos RLS.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: Duration(seconds: failedTables.isEmpty ? 4 : 10),
+          backgroundColor: failedTables.isEmpty ? kGreen : kRed,
+        ),
+      );
+    }
   }
 
   String _formatDate(DateTime d) {
