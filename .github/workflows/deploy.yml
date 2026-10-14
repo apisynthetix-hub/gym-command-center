@@ -46,6 +46,7 @@ jobs:
             exit 1
           fi
           echo "Supabase build variables are present."
+
       - name: Build web
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -67,4 +68,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
