@@ -114,6 +114,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   // ═══ LOADING ═══
   bool loadingData = true;
+  final List<String> _supabaseReadErrors = [];
 
   // ═══ TRANSACCIONES ═══
   List<Map<String, dynamic>> transactions = [];
