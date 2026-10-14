@@ -1,6 +1,9 @@
+// lib/gym_command_center.dart
 import 'dart:io' show File;
 import 'dart:math' as math;
 import 'dart:convert';
+import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,21 +16,19 @@ import 'package:screenshot/screenshot.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'supabase_config.dart';
+import 'theme.dart';
+import 'theme_controller.dart';
 
-const Color kBg = Color(0xFF020202);
-const Color kPanel = Color(0xFF070707);
-const Color kPanel2 = Color(0xFF0D0D0D);
-const Color kBorder = Color(0xFF202020);
+// ═══════════════════════════════════════════════════════════
+// ROLES
+// ═══════════════════════════════════════════════════════════
+enum UserRole { none, admin, client }
 
-const Color kRed = Color(0xFFFF1744);
-const Color kYellow = Color(0xFFFFEA00);
-const Color kPurple = Color(0xFFB000FF);
-const Color kGreen = Color(0xFF00FF85);
-
-const Color kWhite = Color(0xFFF4F4F5);
-const Color kMuted = Color(0xFF77777F);
-
+// ═══════════════════════════════════════════════════════════
+// WIDGET PRINCIPAL
+// ═══════════════════════════════════════════════════════════
 class GymCommandCenter extends StatefulWidget {
   const GymCommandCenter({super.key});
 
@@ -37,25 +38,55 @@ class GymCommandCenter extends StatefulWidget {
 
 class _GymCommandCenterState extends State<GymCommandCenter>
     with TickerProviderStateMixin {
+  // ═══ SESIÓN / LOGIN ═══
+  UserRole currentRole = UserRole.none;
+  Map<String, dynamic>? loggedClient;
+  String adminPin = '1234';
+  int pinAttempts = 0;
+  DateTime? pinLockedUntil;
+  final TextEditingController pinController = TextEditingController();
+  final TextEditingController clientCedulaController = TextEditingController();
+  String loginScreen = 'choose';
+
+  // ═══ NAVEGACIÓN ═══
   int _section = 0;
 
+  // ═══ AFORO ADMIN ═══
   int capacity = 150;
   int inside = 0;
   bool loadingCheckins = false;
 
+  // ═══ AFORO CLIENTE ═══
+  int clientInsideCount = 0;
+  bool clientLoadingAforo = false;
+  int clientCapacity = 150;
+  Timer? _aforoTimer;
+
+  // ═══ RACHA CLIENTE ═══
+  int clientStreak = 0;
+  List<String> clientCheckinDates = [];
+
+  // ═══ FINANZAS ═══
   double income = 0;
   int activeMembers = 0;
 
+  // ═══ MONEDAS ═══
   String selectedCurrency = 'USD';
   bool showConversion = true;
-
   double usdToVes = 40.00;
   double eurToVes = 43.50;
   double copToVes = 0.01;
 
+  // ═══ QR SCREENSHOT ═══
   final ScreenshotController _qrScreenshotController = ScreenshotController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
+  // ═══ ALERTAS ═══
+  String alertFilter = 'TODAS';
+  Set<String> dismissedAlerts = {};
+  String dismissedDate = '';
+
+  // ═══ MONEDAS DISPONIBLES ═══
   final List<Map<String, String>> availableCurrencies = [
     {'code': 'USD', 'name': 'Dólar', 'symbol': '\$'},
     {'code': 'EUR', 'name': 'Euro', 'symbol': '€'},
@@ -63,26 +94,28 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     {'code': 'COP', 'name': 'Peso Colombiano', 'symbol': '\$'},
   ];
 
+  // ═══ BÚSQUEDA / FILTROS ═══
   final TextEditingController searchController = TextEditingController();
-
   String clientFilter = 'TODOS';
 
+  // ═══ QR GYM ═══
   String qrMode = 'DIARIO';
   String qrToken = '';
   DateTime qrGenerated = DateTime.now();
   DateTime qrExpires = DateTime.now();
 
+  // ═══ FINANZAS FILTROS ═══
   String financePeriod = 'MES';
   String transactionFilter = 'TODOS';
 
-  // ═══════════════════════════════════════════════════════════
-  // ENTRENAMIENTO — ESTADO
-  // ═══════════════════════════════════════════════════════════
+  // ═══ ENTRENAMIENTO ═══
   int trainingTab = 0;
   String exerciseFilter = 'TODOS';
 
+  // ═══ LOADING ═══
   bool loadingData = true;
 
+  // ═══ TRANSACCIONES ═══
   List<Map<String, dynamic>> transactions = [];
   List<double> monthlyIncome = List<double>.filled(12, 0);
   List<double> weeklyIncome = [0, 0, 0, 0];
@@ -109,831 +142,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     'DIC'
   ];
 
-  double get totalIncome => transactions
-      .where((t) => t['type'] == 'INGRESO')
-      .fold(0.0, (s, t) => s + (t['amount'] as num).toDouble());
-
-  double get totalExpense => transactions
-      .where((t) => t['type'] == 'EGRESO')
-      .fold(0.0, (s, t) => s + (t['amount'] as num).abs());
-
-  double get balance => totalIncome - totalExpense;
-
-  double get avgMembership {
-    final ing = transactions.where((t) => t['type'] == 'INGRESO').toList();
-    if (ing.isEmpty) return 0;
-    return ing.fold(0.0, (s, t) => s + (t['amount'] as num).toDouble()) /
-        ing.length;
-  }
-
-  double get mrr {
-    final activeCount = members
-        .where((m) => m['status'].toString().toUpperCase() == 'ACTIVO')
-        .length;
-    if (activeCount == 0) return 0;
-    return activeCount * avgMembership;
-  }
-
-  double get retention {
-    if (members.isEmpty) return 0;
-    final activos = members
-        .where((m) => m['status'].toString().toUpperCase() == 'ACTIVO')
-        .length;
-    return (activos / members.length) * 100;
-  }
-
-  double get ltv => avgMembership * 12;
-
-  List<Map<String, dynamic>> get filteredTransactions {
-    if (transactionFilter == 'INGRESOS') {
-      return transactions.where((t) => t['type'] == 'INGRESO').toList();
-    }
-    if (transactionFilter == 'EGRESOS') {
-      return transactions.where((t) => t['type'] == 'EGRESO').toList();
-    }
-    return transactions;
-  }
-
-  // ==========================================================
-  // CACHÉ LOCAL
-  // ==========================================================
-
-  Future<void> _saveLocalData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('members', jsonEncode(members));
-      await prefs.setString('plans', jsonEncode(plans));
-      await prefs.setString('transactions', jsonEncode(transactions));
-      await prefs.setString('activities', jsonEncode(activities));
-      await prefs.setString('routines', jsonEncode(routines));
-      await prefs.setString('exercises', jsonEncode(exercises));
-      await prefs.setString('trainers', jsonEncode(trainers));
-      await prefs.setString('classes', jsonEncode(classes));
-      await prefs.setInt('inside', inside);
-      debugPrint('💾 Datos guardados localmente');
-    } catch (e) {
-      debugPrint('❌ Error guardando local: $e');
-    }
-  }
-
-  Future<void> _loadLocalData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-
-      final membersStr = prefs.getString('members');
-      final plansStr = prefs.getString('plans');
-      final transactionsStr = prefs.getString('transactions');
-      final activitiesStr = prefs.getString('activities');
-      final routinesStr = prefs.getString('routines');
-      final exercisesStr = prefs.getString('exercises');
-      final trainersStr = prefs.getString('trainers');
-      final classesStr = prefs.getString('classes');
-      final savedInside = prefs.getInt('inside');
-
-      if (membersStr != null) {
-        final loaded = (jsonDecode(membersStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          members.clear();
-          members.addAll(loaded);
-          activeMembers = members.length;
-        }
-      }
-
-      if (plansStr != null) {
-        final loaded = (jsonDecode(plansStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          plans.clear();
-          plans.addAll(loaded);
-        }
-      }
-
-      if (transactionsStr != null) {
-        final loaded = (jsonDecode(transactionsStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          transactions = loaded;
-        }
-      }
-
-      if (activitiesStr != null) {
-        final loaded = (jsonDecode(activitiesStr) as List)
-            .map((e) => Map<String, String>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          activities.clear();
-          activities.addAll(loaded);
-        }
-      }
-
-      if (routinesStr != null) {
-        final loaded = (jsonDecode(routinesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          routines.clear();
-          routines.addAll(loaded);
-        }
-      }
-
-      if (exercisesStr != null) {
-        final loaded = (jsonDecode(exercisesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          exercises.clear();
-          exercises.addAll(loaded);
-        }
-      }
-
-      if (trainersStr != null) {
-        final loaded = (jsonDecode(trainersStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          trainers.clear();
-          trainers.addAll(loaded);
-        }
-      }
-
-      if (classesStr != null) {
-        final loaded = (jsonDecode(classesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          classes.clear();
-          classes.addAll(loaded);
-        }
-      }
-
-      if (savedInside != null) {
-        inside = savedInside;
-      }
-
-      debugPrint('📂 Datos cargados localmente');
-    } catch (e) {
-      debugPrint('❌ Error cargando local: $e');
-    }
-  }
-
-  // ==========================================================
-  // CARGAR DESDE SUPABASE
-  // ==========================================================
-
-  Future<void> loadMembers() async {
-    try {
-      debugPrint('🔄 Cargando miembros desde Supabase...');
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('members')
-          .select()
-          .order('created_at', ascending: false);
-
-      debugPrint('📦 Miembros recibidos: ${response.length}');
-
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, dynamic>>[];
-        for (final row in response) {
-          loaded.add({
-            'id': row['id'],
-            'name': row['name'] ?? '',
-            'cedula': row['cedula'] ?? '',
-            'phone': row['phone'] ?? '',
-            'plan': row['plan'] ?? '',
-            'expiry': row['expiry'] ?? '',
-            'status': row['status'] ?? 'ACTIVO',
-            'memberSince': row['member_since'] ?? '',
-            'payments': row['payments'] ?? 0,
-            'totalPaid': (row['total_paid'] as num?)?.toDouble() ?? 0.0,
-            'attendance': row['attendance'] ?? 0,
-            'lastVisit': row['last_visit'] ?? '',
-            'qrCode': row['qr_code'] ?? '',
-          });
-        }
-
-        if (!mounted) return;
-        setState(() {
-          members.clear();
-          members.addAll(loaded);
-          activeMembers = members.length;
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading members: $e');
-    }
-  }
-
-  Future<void> loadPayments() async {
-    try {
-      debugPrint('🔄 Cargando pagos desde Supabase...');
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('payments')
-          .select(
-              'id, member_id, amount, method, status, created_at, members(name, plan)')
-          .order('created_at', ascending: false);
-
-      debugPrint('📦 Pagos recibidos: ${response.length}');
-
-      final loaded = <Map<String, dynamic>>[];
-      for (final row in response) {
-        final memberData = row['members'];
-        final createdAt =
-            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
-
-        loaded.add({
-          'name': memberData != null
-              ? (memberData['name'] ?? 'Sin nombre')
-              : 'Sin miembro',
-          'concept':
-              memberData != null ? 'Plan ${memberData['plan'] ?? "—"}' : 'Pago',
-          'amount': (row['amount'] as num?)?.toDouble() ?? 0.0,
-          'method': (row['method'] ?? 'EFECTIVO').toString().toUpperCase(),
-          'date': _formatDate(createdAt),
-          'type': 'INGRESO',
-          'created_at': createdAt,
-        });
-      }
-
-      final calcMonthly = List<double>.filled(12, 0);
-      final currentYear = DateTime.now().year;
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        if (d.year == currentYear) {
-          calcMonthly[d.month - 1] += (t['amount'] as num).toDouble();
-        }
-      }
-
-      final calcMethods = <String, double>{
-        'TARJETA': 0,
-        'EFECTIVO': 0,
-        'TRANSFERENCIA': 0,
-      };
-      final twelveMonthsAgo =
-          DateTime.now().subtract(const Duration(days: 365));
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        if (d.isAfter(twelveMonthsAgo)) {
-          final m = t['method'].toString();
-          calcMethods[m] =
-              (calcMethods[m] ?? 0) + (t['amount'] as num).toDouble();
-        }
-      }
-
-      final calcWeekly = List<double>.filled(4, 0);
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        final diffDays = DateTime.now().difference(d).inDays;
-        if (diffDays < 28 && diffDays >= 0) {
-          final weekIndex = 3 - (diffDays ~/ 7);
-          if (weekIndex >= 0 && weekIndex < 4) {
-            calcWeekly[weekIndex] += (t['amount'] as num).toDouble();
-          }
-        }
-      }
-
-      final planSales = <String, Map<String, dynamic>>{};
-      for (final t in loaded) {
-        final concept = t['concept'].toString();
-        if (!planSales.containsKey(concept)) {
-          planSales[concept] = {'sales': 0, 'revenue': 0.0};
-        }
-        planSales[concept]!['sales'] =
-            (planSales[concept]!['sales'] as int) + 1;
-        planSales[concept]!['revenue'] =
-            (planSales[concept]!['revenue'] as double) +
-                (t['amount'] as num).toDouble();
-      }
-
-      final sortedPlans = planSales.entries.toList()
-        ..sort((a, b) => (b.value['revenue'] as double)
-            .compareTo(a.value['revenue'] as double));
-
-      final colors = [kRed, kPurple, kYellow, kGreen];
-      final loadedTopPlans = <Map<String, dynamic>>[];
-      for (int i = 0; i < sortedPlans.length && i < 4; i++) {
-        final e = sortedPlans[i];
-        loadedTopPlans.add({
-          'name': e.key.replaceFirst('Plan ', ''),
-          'sales': e.value['sales'],
-          'revenue': e.value['revenue'],
-          'color': colors[i % colors.length],
-        });
-      }
-
-      double totalIngresos = 0;
-      for (final t in loaded) {
-        totalIngresos += (t['amount'] as num).toDouble();
-      }
-
-      if (!mounted) return;
-      if (loaded.isNotEmpty) {
-        setState(() {
-          transactions = loaded;
-          monthlyIncome = calcMonthly;
-          paymentMethods = calcMethods;
-          weeklyIncome = calcWeekly;
-          weeklyExpense = [0, 0, 0, 0];
-          topPlans = loadedTopPlans;
-          income = totalIngresos;
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading payments: $e');
-    }
-  }
-
-  Future<void> loadPlans() async {
-    try {
-      debugPrint('🔄 Cargando planes desde Supabase...');
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('plans')
-          .select()
-          .order('created_at', ascending: true);
-
-      debugPrint('📦 Planes recibidos: ${response.length}');
-
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, dynamic>>[];
-        for (final row in response) {
-          loaded.add({
-            'id': row['id'],
-            'name': row['name'] ?? '',
-            'price': (row['price'] as num?)?.toDouble() ?? 0.0,
-            'days': (row['days'] as num?)?.toInt() ?? 30,
-            'access': row['access'] ?? 'ILIMITADO',
-          });
-        }
-
-        if (!mounted) return;
-        setState(() {
-          plans.clear();
-          plans.addAll(loaded);
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading plans: $e');
-    }
-  }
-
-  Future<void> loadActivities() async {
-    try {
-      debugPrint('🔄 Cargando actividades desde Supabase...');
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('activities')
-          .select()
-          .order('created_at', ascending: false)
-          .limit(20);
-
-      debugPrint('📦 Actividades recibidas: ${response.length}');
-
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, String>>[];
-        for (final row in response) {
-          final createdAt =
-              DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
-          loaded.add({
-            'type': row['type'] ?? '',
-            'name': row['name'] ?? '',
-            'time':
-                '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}',
-          });
-        }
-
-        if (!mounted) return;
-        setState(() {
-          activities.clear();
-          activities.addAll(loaded);
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading activities: $e');
-    }
-  }
-
-  Future<void> loadCheckins() async {
-    try {
-      setState(() => loadingCheckins = true);
-
-      debugPrint('🔄 Cargando checkins de hoy...');
-      final supabase = Supabase.instance.client;
-
-      final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
-
-      final response = await supabase
-          .from('checkins')
-          .select()
-          .gte('created_at', startOfDayStr)
-          .order('created_at', ascending: true);
-
-      debugPrint('📦 Checkins recibidos: ${response.length}');
-
-      int entradas = 0;
-      int salidas = 0;
-
-      for (final row in response) {
-        final type = (row['type'] ?? '').toString().toUpperCase();
-        final authorized = row['authorized'] ?? true;
-
-        if (type == 'ENTRADA' && authorized == true) {
-          entradas++;
-        } else if (type == 'SALIDA') {
-          salidas++;
-        }
-      }
-
-      final calculated = entradas - salidas;
-      final finalInside = calculated < 0 ? 0 : calculated;
-
-      if (!mounted) return;
-      setState(() {
-        inside = finalInside;
-        loadingCheckins = false;
-      });
-
-      debugPrint(
-          '✅ Aforo: $entradas entradas - $salidas salidas = $finalInside');
-    } catch (e) {
-      debugPrint('❌ Error cargando checkins: $e');
-      if (mounted) {
-        setState(() => loadingCheckins = false);
-      }
-    }
-  }
-
-  Future<void> loadAllData() async {
-    await _loadLocalData();
-    if (mounted) {
-      setState(() => loadingData = false);
-    }
-    _syncWithSupabase();
-  }
-
-  Future<void> _syncWithSupabase() async {
-    debugPrint('🔄 Iniciando conexión con Supabase...');
-
-    try {
-      Supabase.instance.client;
-      debugPrint('✅ Supabase ya estaba inicializado');
-    } catch (_) {
-      try {
-        debugPrint('🔄 Inicializando Supabase desde el widget...');
-        await Supabase.initialize(
-          url: SupabaseConfig.supabaseUrl,
-          anonKey: SupabaseConfig.supabaseAnonKey,
-        );
-        debugPrint('✅ Supabase.initialize() completado');
-
-        await Future.delayed(const Duration(milliseconds: 500));
-      } catch (e) {
-        debugPrint('❌ Error al inicializar Supabase: $e');
-        debugPrint('⚠️ Modo offline activo.');
-        return;
-      }
-    }
-
-    bool supabaseReady = false;
-    for (int i = 0; i < 50; i++) {
-      try {
-        Supabase.instance.client;
-        supabaseReady = true;
-        debugPrint('✅ Supabase cliente listo tras ${i * 100}ms');
-        break;
-      } catch (_) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-    }
-
-    if (!supabaseReady) {
-      debugPrint('⚠️ Supabase no está listo. Modo offline.');
-      return;
-    }
-
-    try {
-      await loadPlans();
-    } catch (e) {
-      debugPrint('❌ Plans: $e');
-    }
-
-    try {
-      await loadMembers();
-    } catch (e) {
-      debugPrint('❌ Members: $e');
-    }
-
-    try {
-      await loadPayments();
-    } catch (e) {
-      debugPrint('❌ Payments: $e');
-    }
-
-    try {
-      await loadActivities();
-    } catch (e) {
-      debugPrint('❌ Activities: $e');
-    }
-
-    try {
-      await loadCheckins();
-    } catch (e) {
-      debugPrint('❌ Checkins: $e');
-    }
-
-    await _saveLocalData();
-    debugPrint('✅ Sincronización completa');
-  }
-
-  String _formatDate(DateTime d) {
-    final now = DateTime.now();
-    final diff = now.difference(d);
-
-    if (diff.inHours < 24 && now.day == d.day) {
-      return 'Hoy ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    }
-    if (diff.inDays < 2) {
-      return 'Ayer ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    }
-    return '${d.day}/${d.month}/${d.year}';
-  }
-
-  String _calculateExpiryDate(String planName, DateTime from) {
-    int days = 30;
-    for (final p in plans) {
-      if (p['name'].toString().toLowerCase() == planName.toLowerCase()) {
-        days = (p['days'] as num?)?.toInt() ?? 30;
-        break;
-      }
-    }
-    final expiry = from.add(Duration(days: days));
-    return '${expiry.day.toString().padLeft(2, '0')} ${_monthName(expiry.month)} ${expiry.year}';
-  }
-
-  String _formatMemberSince(DateTime d) {
-    return '${d.day.toString().padLeft(2, '0')} ${_monthName(d.month)} ${d.year}';
-  }
-
-  String _monthName(int month) {
-    const months = [
-      'ENE',
-      'FEB',
-      'MAR',
-      'ABR',
-      'MAY',
-      'JUN',
-      'JUL',
-      'AGO',
-      'SEP',
-      'OCT',
-      'NOV',
-      'DIC'
-    ];
-    if (month < 1 || month > 12) return 'ENE';
-    return months[month - 1];
-  }
-
-  String _generateToken() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = math.Random();
-    String result = '';
-    for (int i = 0; i < 6; i++) {
-      result += chars[random.nextInt(chars.length)];
-    }
-    return result;
-  }
-
-  String _formatDateForCode(DateTime d) {
-    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-  }
-
-  void generateGymQr() {
-    final now = DateTime.now();
-    final token = _generateToken();
-
-    String code;
-    DateTime exp;
-
-    switch (qrMode) {
-      case 'DIARIO':
-        code = 'SYNTH-GYM-${_formatDateForCode(now)}-$token';
-        exp = DateTime(now.year, now.month, now.day, 23, 59, 59);
-        break;
-      case 'SEMANAL':
-        code = 'SYNTH-GYM-WEEK-${_formatDateForCode(now)}-$token';
-        exp = now.add(const Duration(days: 7));
-        break;
-      case 'FIJO':
-      default:
-        code = 'SYNTH-GYM-FIXED-$token';
-        exp = now.add(const Duration(days: 3650));
-        break;
-    }
-
-    setState(() {
-      qrToken = code;
-      qrGenerated = now;
-      qrExpires = exp;
-    });
-  }
-
-  String get qrTimeLeft {
-    final now = DateTime.now();
-    final diff = qrExpires.difference(now);
-
-    if (diff.isNegative) return 'EXPIRADO';
-
-    if (diff.inDays > 0) {
-      return 'Expira en ${diff.inDays} dia(s)';
-    } else if (diff.inHours > 0) {
-      return 'Expira en ${diff.inHours} hora(s)';
-    } else {
-      return 'Expira en ${diff.inMinutes} minuto(s)';
-    }
-  }
-
-  Future<void> downloadQrAsPng() async {
-    try {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Generando PNG...'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-
-      final Uint8List? imageBytes = await _qrScreenshotController.capture();
-
-      if (imageBytes == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Error: no se pudo capturar el QR'),
-              backgroundColor: kRed,
-            ),
-          );
-        }
-        return;
-      }
-
-      if (kIsWeb) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'En web: clic derecho sobre el QR y "Guardar imagen como"',
-              ),
-              duration: Duration(seconds: 4),
-            ),
-          );
-        }
-      } else {
-        final directory = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
-        final file = File(filePath);
-        await file.writeAsBytes(imageBytes);
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('QR guardado en: $filePath'),
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al descargar: $e'),
-            backgroundColor: kRed,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> shareQrPng() async {
-    try {
-      final Uint8List? imageBytes = await _qrScreenshotController.capture();
-
-      if (imageBytes == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Error: no se pudo capturar el QR'),
-              backgroundColor: kRed,
-            ),
-          );
-        }
-        return;
-      }
-
-      if (kIsWeb) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'En Web: usa DESCARGAR PNG (clic derecho sobre el QR y Guardar imagen)',
-              ),
-              duration: Duration(seconds: 4),
-            ),
-          );
-        }
-        return;
-      }
-
-      final directory = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
-      final file = File(filePath);
-      await file.writeAsBytes(imageBytes);
-
-      await Share.shareXFiles(
-        [XFile(filePath)],
-        text: 'QR de acceso del gimnasio - $qrToken',
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al compartir: $e'),
-            backgroundColor: kRed,
-          ),
-        );
-      }
-    }
-  }
-
-  Future<void> sharePlan(Map<String, dynamic> plan, double price) async {
-    final name = plan['name'].toString();
-    final days = plan['days'].toString();
-    final access = plan['access'].toString();
-    final priceStr = formatPrice(price);
-    final secondary = showConversion ? formatPriceSecondary(price) : '';
-
-    final text = '''
-🏋️ SYNTHETIX GYM OS PRO
-━━━━━━━━━━━━━━━━━━━━━
-📋 PLAN: ${name.toUpperCase()}
-💰 PRECIO: $priceStr
-${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
-⏱️ VIGENCIA: $days días
-🎟️ ACCESO: $access
-━━━━━━━━━━━━━━━━━━━━━
-¡Inscríbete ya! 💪
-''';
-
-    try {
-      if (kIsWeb) {
-        await Clipboard.setData(ClipboardData(text: text));
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Plan "$name" copiado al portapapeles'),
-              backgroundColor: kPurple,
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-        return;
-      }
-
-      await Share.share(
-        text,
-        subject: 'Plan $name - SYNTHETIX GYM',
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al compartir plan: $e'),
-            backgroundColor: kRed,
-          ),
-        );
-      }
-    }
-  }
-
-  final List<Map<String, dynamic>> accessLog = [];
-
   // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — MIEMBROS
+  // DATA DEMO (declarada UNA sola vez)
   // ═══════════════════════════════════════════════════════════
   final List<Map<String, dynamic>> members = [
     {
       'id': 'local-demo-1',
       'name': 'Cliente Demo',
-      'cedula': '',
+      'cedula': '12345678',
       'phone': '+00 000 000000',
       'plan': 'Basic',
       'expiry': '31 DIC 2026',
@@ -947,9 +163,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — PLANES
-  // ═══════════════════════════════════════════════════════════
   final List<Map<String, dynamic>> plans = [
     {
       'id': 'local-p1',
@@ -981,16 +194,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — ACTIVIDADES
-  // ═══════════════════════════════════════════════════════════
   final List<Map<String, String>> activities = [
     {'type': 'SISTEMA', 'name': 'App iniciada', 'time': 'Ahora'},
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — RUTINAS
-  // ═══════════════════════════════════════════════════════════
   final List<Map<String, dynamic>> routines = [
     {
       'id': 'r1',
@@ -1039,9 +246,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — EJERCICIOS
-  // ═══════════════════════════════════════════════════════════
   final List<Map<String, dynamic>> exercises = [
     {
       'id': 'e1',
@@ -1153,9 +357,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — ENTRENADORES
-  // ═══════════════════════════════════════════════════════════
   final List<Map<String, dynamic>> trainers = [
     {
       'id': 't1',
@@ -1231,9 +432,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // DATOS INICIALES — CLASES (HORARIO)
-  // ═══════════════════════════════════════════════════════════
+  final List<Map<String, dynamic>> classTypes = [
+    {'id': 'ct1', 'name': 'YOGA', 'color': 0xFFB000FF, 'icon': 0xe4a4},
+    {'id': 'ct2', 'name': 'SPINNING', 'color': 0xFFFFEA00, 'icon': 0xe4a7},
+    {'id': 'ct3', 'name': 'CROSSFIT', 'color': 0xFFFF1744, 'icon': 0xe4a8},
+    {'id': 'ct4', 'name': 'BOXEO', 'color': 0xFF00FF85, 'icon': 0xe4a9},
+    {'id': 'ct5', 'name': 'PILATES', 'color': 0xFF00E0FF, 'icon': 0xe4aa},
+  ];
+
   final List<Map<String, dynamic>> classes = [
     {
       'id': 'c1',
@@ -1428,29 +634,1111 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       'room': 'Box Cross'
     },
   ];
+  // ═══════════════════════════════════════════════════════════
+  // GETTERS FINANCIEROS
+  // ═══════════════════════════════════════════════════════════
+  double get totalIncome => transactions
+      .where((t) => t['type'] == 'INGRESO')
+      .fold(0.0, (s, t) => s + (t['amount'] as num).toDouble());
 
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      generateGymQr();
-      await _loadLocalData();
-      if (mounted) {
-        setState(() => loadingData = false);
-      }
-      _syncWithSupabase();
-    });
+  double get totalExpense => transactions
+      .where((t) => t['type'] == 'EGRESO')
+      .fold(0.0, (s, t) => s + (t['amount'] as num).abs());
+
+  double get balance => totalIncome - totalExpense;
+
+  double get avgMembership {
+    final ing = transactions.where((t) => t['type'] == 'INGRESO').toList();
+    if (ing.isEmpty) return 0;
+    return ing.fold(0.0, (s, t) => s + (t['amount'] as num).toDouble()) /
+        ing.length;
   }
 
-  @override
-  void dispose() {
-    searchController.dispose();
-    super.dispose();
+  double get mrr {
+    final activeCount = members
+        .where((m) => m['status'].toString().toUpperCase() == 'ACTIVO')
+        .length;
+    if (activeCount == 0) return 0;
+    return activeCount * avgMembership;
   }
+
+  double get retention {
+    if (members.isEmpty) return 0;
+    final activos = members
+        .where((m) => m['status'].toString().toUpperCase() == 'ACTIVO')
+        .length;
+    return (activos / members.length) * 100;
+  }
+
+  double get ltv => avgMembership * 12;
 
   double get occupancy {
     if (capacity == 0) return 0;
     return inside / capacity;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // GETTERS AFORO CLIENTE
+  // ═══════════════════════════════════════════════════════════
+  double get clientOccupancy {
+    if (clientCapacity == 0) return 0;
+    return clientInsideCount / clientCapacity;
+  }
+
+  String get clientAforoStatus {
+    if (clientCapacity == 0) return 'SIN DATOS';
+    final pct = clientInsideCount / clientCapacity;
+    if (pct >= 0.8) return 'LLENO';
+    if (pct >= 0.5) return 'MEDIO';
+    return 'TRANQUILO';
+  }
+
+  Color clientAforoColor(BuildContext context) {
+    if (clientCapacity == 0) return context.colors.muted;
+    final pct = clientInsideCount / clientCapacity;
+    if (pct >= 0.8) return context.colors.red;
+    if (pct >= 0.5) return context.colors.yellow;
+    return context.colors.green;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // GETTERS TRANSACCIONES FILTRADAS
+  // ═══════════════════════════════════════════════════════════
+  List<Map<String, dynamic>> get filteredTransactions {
+    if (transactionFilter == 'INGRESOS') {
+      return transactions.where((t) => t['type'] == 'INGRESO').toList();
+    }
+    if (transactionFilter == 'EGRESOS') {
+      return transactions.where((t) => t['type'] == 'EGRESO').toList();
+    }
+    return transactions;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ALERTAS
+  // ═══════════════════════════════════════════════════════════
+  List<Map<String, dynamic>> activeAlerts(BuildContext context) {
+    final alerts = <Map<String, dynamic>>[];
+
+    for (final m in members) {
+      if (m['status'].toString().toUpperCase() == 'PENDIENTE') {
+        final id = 'pendiente-${m['id']}';
+        if (dismissedAlerts.contains(id)) continue;
+        alerts.add({
+          'id': id,
+          'type': 'PENDIENTE',
+          'title': '${m['name']}',
+          'subtitle': 'Nuevo registro · Esperando aprobación',
+          'color': context.colors.purple,
+          'icon': Icons.person_add_alt_1_rounded,
+          'member': m,
+          'action': 'approve_client',
+        });
+      }
+    }
+
+    for (final m in members) {
+      if (m['status'].toString().toUpperCase() == 'VENCIDO') {
+        final id = 'vencida-${m['id']}';
+        if (dismissedAlerts.contains(id)) continue;
+        alerts.add({
+          'id': id,
+          'type': 'VENCIDA',
+          'title': '${m['name']}',
+          'subtitle': 'Membresía vencida · Plan ${m['plan']}',
+          'color': context.colors.red,
+          'icon': Icons.block_rounded,
+          'member': m,
+          'action': 'client_detail',
+        });
+      }
+    }
+
+    for (final m in members) {
+      if (m['status'].toString().toUpperCase() == 'POR VENCER') {
+        final id = 'porvencer-${m['id']}';
+        if (dismissedAlerts.contains(id)) continue;
+        alerts.add({
+          'id': id,
+          'type': 'POR VENCER',
+          'title': '${m['name']}',
+          'subtitle': 'Vence pronto · Plan ${m['plan']}',
+          'color': context.colors.yellow,
+          'icon': Icons.warning_amber_rounded,
+          'member': m,
+          'action': 'client_detail',
+        });
+      }
+    }
+
+    if (capacity > 0 && inside / capacity >= 0.8) {
+      final id = 'aforo-alto';
+      if (!dismissedAlerts.contains(id)) {
+        alerts.add({
+          'id': id,
+          'type': 'AFORO',
+          'title': 'Aforo alto',
+          'subtitle': '$inside/$capacity personas dentro',
+          'color': context.colors.blue,
+          'icon': Icons.people_alt_rounded,
+          'action': 'dashboard',
+        });
+      }
+    }
+
+    return alerts;
+  }
+
+  int alertCount(BuildContext context) => activeAlerts(context).length;
+
+  List<Map<String, dynamic>> filteredAlerts(BuildContext context) {
+    final all = activeAlerts(context);
+    if (alertFilter == 'TODAS') return all;
+    if (alertFilter == 'PENDIENTES') {
+      return all.where((a) => a['type'] == 'PENDIENTE').toList();
+    }
+    if (alertFilter == 'VENCIDAS') {
+      return all.where((a) => a['type'] == 'VENCIDA').toList();
+    }
+    if (alertFilter == 'POR VENCER') {
+      return all.where((a) => a['type'] == 'POR VENCER').toList();
+    }
+    if (alertFilter == 'INFO') {
+      return all.where((a) => a['type'] == 'AFORO').toList();
+    }
+    return all;
+  }
+
+  void dismissAlert(String id) {
+    setState(() => dismissedAlerts.add(id));
+    _saveLocalData();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // LOGIN / PIN
+  // ═══════════════════════════════════════════════════════════
+  bool get isPinLocked {
+    if (pinLockedUntil == null) return false;
+    return DateTime.now().isBefore(pinLockedUntil!);
+  }
+
+  int get pinLockSecondsLeft {
+    if (pinLockedUntil == null) return 0;
+    final diff = pinLockedUntil!.difference(DateTime.now()).inSeconds;
+    return diff > 0 ? diff : 0;
+  }
+
+  void tryAdminLogin() {
+    if (isPinLocked) return;
+
+    if (pinController.text == adminPin) {
+      setState(() {
+        currentRole = UserRole.admin;
+        pinController.clear();
+        pinAttempts = 0;
+        loginScreen = 'choose';
+      });
+      _saveLocalData();
+    } else {
+      pinAttempts++;
+      if (pinAttempts >= 3) {
+        pinLockedUntil = DateTime.now().add(const Duration(seconds: 60));
+        pinAttempts = 0;
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content:
+                  const Text('Demasiados intentos. Bloqueado 60 segundos.'),
+              backgroundColor: ctx.colors.red,
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: Text('PIN incorrecto · Intento $pinAttempts de 3'),
+              backgroundColor: ctx.colors.red,
+            ),
+          );
+        }
+      }
+      pinController.clear();
+      setState(() {});
+    }
+  }
+
+  Future<void> tryClientLogin() async {
+    final cedula = clientCedulaController.text.trim();
+    if (cedula.isEmpty) {
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: const Text('Ingresa tu cédula'),
+            backgroundColor: ctx.colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('members')
+          .select()
+          .eq('cedula', cedula)
+          .maybeSingle();
+
+      if (response == null) {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: const Text('Cédula no encontrada'),
+              backgroundColor: ctx.colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      final member = {
+        'id': response['id'],
+        'name': response['name'] ?? '',
+        'cedula': response['cedula'] ?? '',
+        'phone': response['phone'] ?? '',
+        'plan': response['plan'] ?? '',
+        'expiry': response['expiry'] ?? '',
+        'status': response['status'] ?? 'ACTIVO',
+        'memberSince': response['member_since'] ?? '',
+        'payments': response['payments'] ?? 0,
+        'totalPaid': (response['total_paid'] as num?)?.toDouble() ?? 0.0,
+        'attendance': response['attendance'] ?? 0,
+        'lastVisit': response['last_visit'] ?? '',
+        'qrCode': response['qr_code'] ?? '',
+      };
+
+      if (!mounted) return;
+      setState(() {
+        loggedClient = member;
+        currentRole = UserRole.client;
+        clientCedulaController.clear();
+        loginScreen = 'choose';
+      });
+      await _saveLocalData();
+      await loadClientAforo();
+      await loadClientStreak();
+      startAforoAutoRefresh();
+    } catch (e) {
+      debugPrint('❌ Error login cliente: $e');
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: ctx.colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void logout() {
+    _aforoTimer?.cancel();
+    setState(() {
+      currentRole = UserRole.none;
+      loggedClient = null;
+      _section = 0;
+      loginScreen = 'choose';
+      pinController.clear();
+      clientCedulaController.clear();
+      clientInsideCount = 0;
+      clientStreak = 0;
+      clientCheckinDates = [];
+    });
+    _saveLocalData();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CONFIRMAR LOGOUT
+  // ═══════════════════════════════════════════════════════════
+  void confirmLogout() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: dialogContext.colors.panel,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide(color: dialogContext.colors.border),
+          ),
+          title: Text(
+            'CERRAR SESIÓN',
+            style: TextStyle(
+              color: dialogContext.colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          content: Text(
+            '¿Seguro que deseas cerrar sesión?',
+            style: TextStyle(color: dialogContext.colors.muted),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: Text(
+                'CANCELAR',
+                style: TextStyle(color: dialogContext.colors.muted),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+                logout();
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: dialogContext.colors.red,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Text(
+                'CERRAR',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // AFORO EN TIEMPO REAL DEL CLIENTE
+  // ═══════════════════════════════════════════════════════════
+  Future<void> loadClientAforo() async {
+    if (loggedClient == null) return;
+
+    try {
+      if (mounted) setState(() => clientLoadingAforo = true);
+
+      final supabase = Supabase.instance.client;
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      final startOfDayStr = startOfDay.toIso8601String();
+
+      final response = await supabase
+          .from('checkins')
+          .select()
+          .gte('created_at', startOfDayStr)
+          .order('created_at', ascending: true);
+
+      int entradas = 0;
+      int salidas = 0;
+
+      for (final row in response) {
+        final type = (row['type'] ?? '').toString().toUpperCase();
+        final authorized = row['authorized'] ?? true;
+
+        if (type == 'ENTRADA' && authorized == true) {
+          entradas++;
+        } else if (type == 'SALIDA') {
+          salidas++;
+        }
+      }
+
+      final calculated = entradas - salidas;
+      final finalInside = calculated < 0 ? 0 : calculated;
+
+      if (!mounted) return;
+      setState(() {
+        clientInsideCount = finalInside;
+        clientCapacity = capacity;
+        clientLoadingAforo = false;
+      });
+    } catch (e) {
+      debugPrint('❌ Error cargando aforo cliente: $e');
+      if (mounted) {
+        setState(() => clientLoadingAforo = false);
+      }
+    }
+  }
+
+  void startAforoAutoRefresh() {
+    _aforoTimer?.cancel();
+    _aforoTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      if (currentRole == UserRole.client && loggedClient != null) {
+        loadClientAforo();
+      } else {
+        timer.cancel();
+      }
+    });
+  }
+
+  void stopAforoAutoRefresh() {
+    _aforoTimer?.cancel();
+    _aforoTimer = null;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // RACHA DEL CLIENTE
+  // ═══════════════════════════════════════════════════════════
+  Future<void> loadClientStreak() async {
+    if (loggedClient == null) return;
+
+    try {
+      final supabase = Supabase.instance.client;
+      final memberId = loggedClient!['id'];
+
+      final sixtyDaysAgo = DateTime.now().subtract(const Duration(days: 60));
+      final sixtyDaysAgoStr = sixtyDaysAgo.toIso8601String();
+
+      final response = await supabase
+          .from('checkins')
+          .select()
+          .eq('member_id', memberId)
+          .eq('type', 'ENTRADA')
+          .gte('created_at', sixtyDaysAgoStr)
+          .order('created_at', ascending: false);
+
+      final Set<String> uniqueDays = {};
+      for (final row in response) {
+        final d =
+            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+        final key =
+            '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+        uniqueDays.add(key);
+      }
+
+      final sortedDays = uniqueDays.toList()..sort((a, b) => b.compareTo(a));
+
+      int streak = 0;
+      DateTime cursor = DateTime.now();
+      cursor = DateTime(cursor.year, cursor.month, cursor.day);
+
+      for (int i = 0; i < 60; i++) {
+        final key =
+            '${cursor.year}-${cursor.month.toString().padLeft(2, '0')}-${cursor.day.toString().padLeft(2, '0')}';
+
+        if (sortedDays.contains(key)) {
+          streak++;
+        } else if (i == 0) {
+          // Permite racha viva
+        } else {
+          break;
+        }
+
+        cursor = cursor.subtract(const Duration(days: 1));
+      }
+
+      if (!mounted) return;
+      setState(() {
+        clientStreak = streak;
+        clientCheckinDates = sortedDays;
+      });
+    } catch (e) {
+      debugPrint('❌ Error cargando racha: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PERSISTENCIA
+  // ═══════════════════════════════════════════════════════════
+  Future<void> _saveLocalData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('members', jsonEncode(members));
+      await prefs.setString('plans', jsonEncode(plans));
+      await prefs.setString('transactions', jsonEncode(transactions));
+      await prefs.setString('activities', jsonEncode(activities));
+      await prefs.setString('routines', jsonEncode(routines));
+      await prefs.setString('exercises', jsonEncode(exercises));
+      await prefs.setString('trainers', jsonEncode(trainers));
+      await prefs.setString('classes', jsonEncode(classes));
+      await prefs.setString('classTypes', jsonEncode(classTypes));
+      await prefs.setInt('inside', inside);
+      await prefs.setStringList('dismissedAlerts', dismissedAlerts.toList());
+      await prefs.setString('dismissedDate', dismissedDate);
+      await prefs.setString('adminPin', adminPin);
+      debugPrint('💾 Datos guardados localmente');
+    } catch (e) {
+      debugPrint('❌ Error guardando local: $e');
+    }
+  }
+
+  Future<void> _loadLocalData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final savedAdminPin = prefs.getString('adminPin');
+      adminPin =
+          (savedAdminPin != null && RegExp(r'^\d{4}$').hasMatch(savedAdminPin))
+              ? savedAdminPin
+              : '1234';
+      if (savedAdminPin != adminPin) {
+        await prefs.setString('adminPin', adminPin);
+      }
+
+      final todayKey = _formatDateForCode(DateTime.now());
+      final savedDismissedDate = prefs.getString('dismissedDate') ?? '';
+      if (savedDismissedDate != todayKey) {
+        await prefs.setStringList('dismissedAlerts', []);
+        await prefs.setString('dismissedDate', todayKey);
+        dismissedAlerts = {};
+        dismissedDate = todayKey;
+      } else {
+        final saved = prefs.getStringList('dismissedAlerts') ?? [];
+        dismissedAlerts = saved.toSet();
+        dismissedDate = savedDismissedDate;
+      }
+
+      final membersStr = prefs.getString('members');
+      final plansStr = prefs.getString('plans');
+      final transactionsStr = prefs.getString('transactions');
+      final activitiesStr = prefs.getString('activities');
+      final routinesStr = prefs.getString('routines');
+      final exercisesStr = prefs.getString('exercises');
+      final trainersStr = prefs.getString('trainers');
+      final classesStr = prefs.getString('classes');
+      final classTypesStr = prefs.getString('classTypes');
+      final savedInside = prefs.getInt('inside');
+
+      if (membersStr != null) {
+        final loaded = (jsonDecode(membersStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          members.clear();
+          members.addAll(loaded);
+          activeMembers = members.length;
+        }
+      }
+
+      if (plansStr != null) {
+        final loaded = (jsonDecode(plansStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          plans.clear();
+          plans.addAll(loaded);
+        }
+      }
+
+      if (transactionsStr != null) {
+        final loaded = (jsonDecode(transactionsStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          transactions = loaded;
+        }
+      }
+
+      if (activitiesStr != null) {
+        final loaded = (jsonDecode(activitiesStr) as List)
+            .map((e) => Map<String, String>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          activities.clear();
+          activities.addAll(loaded);
+        }
+      }
+
+      if (routinesStr != null) {
+        final loaded = (jsonDecode(routinesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          routines.clear();
+          routines.addAll(loaded);
+        }
+      }
+
+      if (exercisesStr != null) {
+        final loaded = (jsonDecode(exercisesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          exercises.clear();
+          exercises.addAll(loaded);
+        }
+      }
+
+      if (trainersStr != null) {
+        final loaded = (jsonDecode(trainersStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          trainers.clear();
+          trainers.addAll(loaded);
+        }
+      }
+
+      if (classesStr != null) {
+        final loaded = (jsonDecode(classesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          classes.clear();
+          classes.addAll(loaded);
+        }
+      }
+
+      if (classTypesStr != null) {
+        final loaded = (jsonDecode(classTypesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          classTypes.clear();
+          classTypes.addAll(loaded);
+        }
+      }
+
+      if (savedInside != null) {
+        inside = savedInside;
+      }
+
+      debugPrint('📂 Datos cargados localmente');
+    } catch (e) {
+      debugPrint('❌ Error cargando local: $e');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // SUPABASE LOADERS
+  // ═══════════════════════════════════════════════════════════
+  Future<void> loadMembers() async {
+    try {
+      debugPrint('🔄 Cargando miembros desde Supabase...');
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('members')
+          .select()
+          .order('created_at', ascending: false);
+
+      debugPrint('📦 Miembros recibidos: ${response.length}');
+
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, dynamic>>[];
+        for (final row in response) {
+          loaded.add({
+            'id': row['id'],
+            'name': row['name'] ?? '',
+            'cedula': row['cedula'] ?? '',
+            'phone': row['phone'] ?? '',
+            'plan': row['plan'] ?? '',
+            'expiry': row['expiry'] ?? '',
+            'status': row['status'] ?? 'ACTIVO',
+            'memberSince': row['member_since'] ?? '',
+            'payments': row['payments'] ?? 0,
+            'totalPaid': (row['total_paid'] as num?)?.toDouble() ?? 0.0,
+            'attendance': row['attendance'] ?? 0,
+            'lastVisit': row['last_visit'] ?? '',
+            'qrCode': row['qr_code'] ?? '',
+          });
+        }
+
+        if (!mounted) return;
+        setState(() {
+          members.clear();
+          members.addAll(loaded);
+          activeMembers = members.length;
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading members: $e');
+    }
+  }
+
+  Future<void> loadPayments() async {
+    try {
+      debugPrint('🔄 Cargando pagos desde Supabase...');
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('payments')
+          .select(
+              'id, member_id, amount, method, status, created_at, members(name, plan)')
+          .order('created_at', ascending: false);
+
+      debugPrint('📦 Pagos recibidos: ${response.length}');
+
+      final loaded = <Map<String, dynamic>>[];
+      for (final row in response) {
+        final memberData = row['members'];
+        final createdAt =
+            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+
+        loaded.add({
+          'name': memberData != null
+              ? (memberData['name'] ?? 'Sin nombre')
+              : 'Sin miembro',
+          'concept':
+              memberData != null ? 'Plan ${memberData['plan'] ?? "—"}' : 'Pago',
+          'amount': (row['amount'] as num?)?.toDouble() ?? 0.0,
+          'method': (row['method'] ?? 'EFECTIVO').toString().toUpperCase(),
+          'date': _formatDate(createdAt),
+          'type': 'INGRESO',
+          'created_at': createdAt,
+        });
+      }
+
+      final calcMonthly = List<double>.filled(12, 0);
+      final currentYear = DateTime.now().year;
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        if (d.year == currentYear) {
+          calcMonthly[d.month - 1] += (t['amount'] as num).toDouble();
+        }
+      }
+
+      final calcMethods = <String, double>{
+        'TARJETA': 0,
+        'EFECTIVO': 0,
+        'TRANSFERENCIA': 0,
+      };
+      final twelveMonthsAgo =
+          DateTime.now().subtract(const Duration(days: 365));
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        if (d.isAfter(twelveMonthsAgo)) {
+          final m = t['method'].toString();
+          calcMethods[m] =
+              (calcMethods[m] ?? 0) + (t['amount'] as num).toDouble();
+        }
+      }
+
+      final calcWeekly = List<double>.filled(4, 0);
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        final diffDays = DateTime.now().difference(d).inDays;
+        if (diffDays < 28 && diffDays >= 0) {
+          final weekIndex = 3 - (diffDays ~/ 7);
+          if (weekIndex >= 0 && weekIndex < 4) {
+            calcWeekly[weekIndex] += (t['amount'] as num).toDouble();
+          }
+        }
+      }
+
+      final planSales = <String, Map<String, dynamic>>{};
+      for (final t in loaded) {
+        final concept = t['concept'].toString();
+        if (!planSales.containsKey(concept)) {
+          planSales[concept] = {'sales': 0, 'revenue': 0.0};
+        }
+        planSales[concept]!['sales'] =
+            (planSales[concept]!['sales'] as int) + 1;
+        planSales[concept]!['revenue'] =
+            (planSales[concept]!['revenue'] as double) +
+                (t['amount'] as num).toDouble();
+      }
+
+      final sortedPlans = planSales.entries.toList()
+        ..sort((a, b) => (b.value['revenue'] as double)
+            .compareTo(a.value['revenue'] as double));
+
+      final loadedTopPlans = <Map<String, dynamic>>[];
+      for (int i = 0; i < sortedPlans.length && i < 4; i++) {
+        final e = sortedPlans[i];
+        loadedTopPlans.add({
+          'name': e.key.replaceFirst('Plan ', ''),
+          'sales': e.value['sales'],
+          'revenue': e.value['revenue'],
+          'colorIndex': i,
+        });
+      }
+
+      double totalIngresos = 0;
+      for (final t in loaded) {
+        totalIngresos += (t['amount'] as num).toDouble();
+      }
+
+      if (!mounted) return;
+      if (loaded.isNotEmpty) {
+        setState(() {
+          transactions = loaded;
+          monthlyIncome = calcMonthly;
+          paymentMethods = calcMethods;
+          weeklyIncome = calcWeekly;
+          weeklyExpense = [0, 0, 0, 0];
+          topPlans = loadedTopPlans;
+          income = totalIngresos;
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading payments: $e');
+    }
+  }
+
+  Future<void> loadPlans() async {
+    try {
+      debugPrint('🔄 Cargando planes desde Supabase...');
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('plans')
+          .select()
+          .order('created_at', ascending: true);
+
+      debugPrint('📦 Planes recibidos: ${response.length}');
+
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, dynamic>>[];
+        for (final row in response) {
+          loaded.add({
+            'id': row['id'],
+            'name': row['name'] ?? '',
+            'price': (row['price'] as num?)?.toDouble() ?? 0.0,
+            'days': (row['days'] as num?)?.toInt() ?? 30,
+            'access': row['access'] ?? 'ILIMITADO',
+          });
+        }
+
+        if (!mounted) return;
+        setState(() {
+          plans.clear();
+          plans.addAll(loaded);
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading plans: $e');
+    }
+  }
+
+  Future<void> loadActivities() async {
+    try {
+      debugPrint('🔄 Cargando actividades desde Supabase...');
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('activities')
+          .select()
+          .order('created_at', ascending: false)
+          .limit(20);
+
+      debugPrint('📦 Actividades recibidas: ${response.length}');
+
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, String>>[];
+        for (final row in response) {
+          final createdAt =
+              DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+          loaded.add({
+            'type': row['type'] ?? '',
+            'name': row['name'] ?? '',
+            'time':
+                '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}',
+          });
+        }
+
+        if (!mounted) return;
+        setState(() {
+          activities.clear();
+          activities.addAll(loaded);
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading activities: $e');
+    }
+  }
+
+  Future<void> loadCheckins() async {
+    try {
+      if (mounted) setState(() => loadingCheckins = true);
+
+      debugPrint('🔄 Cargando checkins de hoy...');
+      final supabase = Supabase.instance.client;
+
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      final startOfDayStr = startOfDay.toIso8601String();
+
+      final response = await supabase
+          .from('checkins')
+          .select()
+          .gte('created_at', startOfDayStr)
+          .order('created_at', ascending: true);
+
+      debugPrint('📦 Checkins recibidos: ${response.length}');
+
+      int entradas = 0;
+      int salidas = 0;
+
+      for (final row in response) {
+        final type = (row['type'] ?? '').toString().toUpperCase();
+        final authorized = row['authorized'] ?? true;
+
+        if (type == 'ENTRADA' && authorized == true) {
+          entradas++;
+        } else if (type == 'SALIDA') {
+          salidas++;
+        }
+      }
+
+      final calculated = entradas - salidas;
+      final finalInside = calculated < 0 ? 0 : calculated;
+
+      if (!mounted) return;
+      setState(() {
+        inside = finalInside;
+        loadingCheckins = false;
+      });
+
+      debugPrint(
+          '✅ Aforo: $entradas entradas - $salidas salidas = $finalInside');
+    } catch (e) {
+      debugPrint('❌ Error cargando checkins: $e');
+      if (mounted) {
+        setState(() => loadingCheckins = false);
+      }
+    }
+  }
+
+  Future<void> loadAllData() async {
+    await _loadLocalData();
+    if (mounted) {
+      setState(() => loadingData = false);
+    }
+    _syncWithSupabase();
+  }
+
+  Future<void> _syncWithSupabase() async {
+    debugPrint('🔄 Iniciando conexión con Supabase...');
+
+    try {
+      Supabase.instance.client;
+      debugPrint('✅ Supabase ya estaba inicializado');
+    } catch (_) {
+      try {
+        debugPrint('🔄 Inicializando Supabase desde el widget...');
+        await Supabase.initialize(
+          url: SupabaseConfig.supabaseUrl,
+          anonKey: SupabaseConfig.supabaseAnonKey,
+        );
+        debugPrint('✅ Supabase.initialize() completado');
+        await Future.delayed(const Duration(milliseconds: 500));
+      } catch (e) {
+        debugPrint('❌ Error al inicializar Supabase: $e');
+        debugPrint('⚠️ Modo offline activo.');
+        return;
+      }
+    }
+
+    bool supabaseReady = false;
+    for (int i = 0; i < 50; i++) {
+      try {
+        Supabase.instance.client;
+        supabaseReady = true;
+        debugPrint('✅ Supabase cliente listo tras ${i * 100}ms');
+        break;
+      } catch (_) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+    }
+
+    if (!supabaseReady) {
+      debugPrint('⚠️ Supabase no está listo. Modo offline.');
+      return;
+    }
+
+    try {
+      await loadPlans();
+    } catch (e) {
+      debugPrint('❌ Plans: $e');
+    }
+
+    try {
+      await loadMembers();
+    } catch (e) {
+      debugPrint('❌ Members: $e');
+    }
+
+    try {
+      await loadPayments();
+    } catch (e) {
+      debugPrint('❌ Payments: $e');
+    }
+
+    try {
+      await loadActivities();
+    } catch (e) {
+      debugPrint('❌ Activities: $e');
+    }
+
+    try {
+      await loadCheckins();
+    } catch (e) {
+      debugPrint('❌ Checkins: $e');
+    }
+
+    await _saveLocalData();
+    debugPrint('✅ Sincronización completa');
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HELPERS
+  // ═══════════════════════════════════════════════════════════
+  String _formatDate(DateTime d) {
+    final now = DateTime.now();
+    final diff = now.difference(d);
+
+    if (diff.inHours < 24 && now.day == d.day) {
+      return 'Hoy ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    }
+    if (diff.inDays < 2) {
+      return 'Ayer ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    }
+    return '${d.day}/${d.month}/${d.year}';
+  }
+
+  String _calculateExpiryDate(String planName, DateTime from) {
+    int days = 30;
+    for (final p in plans) {
+      if (p['name'].toString().toLowerCase() == planName.toLowerCase()) {
+        days = (p['days'] as num?)?.toInt() ?? 30;
+        break;
+      }
+    }
+    final expiry = from.add(Duration(days: days));
+    return '${expiry.day.toString().padLeft(2, '0')} ${_monthName(expiry.month)} ${expiry.year}';
+  }
+
+  String _formatMemberSince(DateTime d) {
+    return '${d.day.toString().padLeft(2, '0')} ${_monthName(d.month)} ${d.year}';
+  }
+
+  String _monthName(int month) {
+    const months = [
+      'ENE',
+      'FEB',
+      'MAR',
+      'ABR',
+      'MAY',
+      'JUN',
+      'JUL',
+      'AGO',
+      'SEP',
+      'OCT',
+      'NOV',
+      'DIC'
+    ];
+    if (month < 1 || month > 12) return 'ENE';
+    return months[month - 1];
+  }
+
+  String _generateToken() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final random = math.Random();
+    String result = '';
+    for (int i = 0; i < 6; i++) {
+      result += chars[random.nextInt(chars.length)];
+    }
+    return result;
+  }
+
+  String _formatDateForCode(DateTime d) {
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   }
 
   String formatPrice(double priceInUsd) {
@@ -1500,6 +1788,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   void addActivity(String type, String name) {
+    if (!mounted) return;
     setState(() {
       activities.insert(0, {
         'type': type,
@@ -1512,24 +1801,1012 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       }
     });
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // ICON HELPER
+  // ═══════════════════════════════════════════════════════════
+  IconData _iconFromCodePoint(int codePoint) {
+    switch (codePoint) {
+      case 0xe4a4:
+        return Icons.self_improvement;
+      case 0xe4a7:
+        return Icons.directions_bike;
+      case 0xe4a8:
+        return Icons.fitness_center;
+      case 0xe4a9:
+        return Icons.sports_mma;
+      case 0xe4aa:
+        return Icons.accessibility_new;
+      case 0xe4ab:
+        return Icons.sports_gymnastics;
+      case 0xe4ac:
+        return Icons.sports_martial_arts;
+      case 0xe4ad:
+        return Icons.sports_handball;
+      default:
+        return Icons.fitness_center;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // QR GYM
+  // ═══════════════════════════════════════════════════════════
+  void generateGymQr() {
+    final now = DateTime.now();
+    final token = _generateToken();
+
+    String code;
+    DateTime exp;
+
+    switch (qrMode) {
+      case 'DIARIO':
+        code = 'SYNTH-GYM-${_formatDateForCode(now)}-$token';
+        exp = DateTime(now.year, now.month, now.day, 23, 59, 59);
+        break;
+      case 'SEMANAL':
+        code = 'SYNTH-GYM-WEEK-${_formatDateForCode(now)}-$token';
+        exp = now.add(const Duration(days: 7));
+        break;
+      case 'FIJO':
+      default:
+        code = 'SYNTH-GYM-FIXED-$token';
+        exp = now.add(const Duration(days: 3650));
+        break;
+    }
+
+    setState(() {
+      qrToken = code;
+      qrGenerated = now;
+      qrExpires = exp;
+    });
+  }
+
+  String get qrTimeLeft {
+    final now = DateTime.now();
+    final diff = qrExpires.difference(now);
+
+    if (diff.isNegative) return 'EXPIRADO';
+
+    if (diff.inDays > 0) {
+      return 'Expira en ${diff.inDays} dia(s)';
+    } else if (diff.inHours > 0) {
+      return 'Expira en ${diff.inHours} hora(s)';
+    } else {
+      return 'Expira en ${diff.inMinutes} minuto(s)';
+    }
+  }
+
+  Future<void> downloadQrAsPng() async {
+    try {
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          const SnackBar(
+            content: Text('Generando PNG...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+
+      final Uint8List? imageBytes = await _qrScreenshotController.capture();
+
+      if (imageBytes == null) {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: const Text('Error: no se pudo capturar el QR'),
+              backgroundColor: ctx.colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (kIsWeb) {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'En web: clic derecho sobre el QR y "Guardar imagen como"',
+              ),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+      } else {
+        final directory = await getApplicationDocumentsDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
+        final file = File(filePath);
+        await file.writeAsBytes(imageBytes);
+
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: Text('QR guardado en: $filePath'),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text('Error al descargar: $e'),
+            backgroundColor: ctx.colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> shareQrPng() async {
+    try {
+      final Uint8List? imageBytes = await _qrScreenshotController.capture();
+
+      if (imageBytes == null) {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: const Text('Error: no se pudo capturar el QR'),
+              backgroundColor: ctx.colors.red,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (kIsWeb) {
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'En Web: usa DESCARGAR PNG (clic derecho sobre el QR y Guardar imagen)',
+              ),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
+      final file = File(filePath);
+      await file.writeAsBytes(imageBytes);
+
+      await Share.shareXFiles(
+        [XFile(filePath)],
+        text: 'QR de acceso del gimnasio - $qrToken',
+      );
+    } catch (e) {
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text('Error al compartir: $e'),
+            backgroundColor: ctx.colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> sharePlan(Map<String, dynamic> plan, double price) async {
+    final name = plan['name'].toString();
+    final days = plan['days'].toString();
+    final access = plan['access'].toString();
+    final priceStr = formatPrice(price);
+    final secondary = showConversion ? formatPriceSecondary(price) : '';
+
+    final text = '''
+🏋️ SYNTHETIX GYM OS PRO
+━━━━━━━━━━━━━━━━━━━━━
+📋 PLAN: ${name.toUpperCase()}
+💰 PRECIO: $priceStr
+${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
+⏱️ VIGENCIA: $days días
+🎟️ ACCESO: $access
+━━━━━━━━━━━━━━━━━━━━━
+¡Inscríbete ya! 💪
+''';
+
+    try {
+      if (kIsWeb) {
+        await Clipboard.setData(ClipboardData(text: text));
+        if (mounted) {
+          final ctx = context;
+          ScaffoldMessenger.of(ctx).showSnackBar(
+            SnackBar(
+              content: Text('Plan "$name" copiado al portapapeles'),
+              backgroundColor: ctx.colors.purple,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+        return;
+      }
+
+      await Share.share(
+        text,
+        subject: 'Plan $name - SYNTHETIX GYM',
+      );
+    } catch (e) {
+      if (mounted) {
+        final ctx = context;
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(
+            content: Text('Error al compartir plan: $e'),
+            backgroundColor: ctx.colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // APROBAR CLIENTE PENDIENTE
+  // ═══════════════════════════════════════════════════════════
+  Future<void> approveClient(Map<String, dynamic> member) async {
+    final memberId = member['id'];
+    if (memberId == null) return;
+
+    final plan = member['plan'].toString();
+    final now = DateTime.now();
+    final expiryDate = _calculateExpiryDate(plan, now);
+
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final ctx = context;
+
+    try {
+      final supabase = Supabase.instance.client;
+
+      await supabase.from('members').update({
+        'status': 'ACTIVO',
+        'expiry': expiryDate,
+      }).eq('id', memberId);
+
+      await supabase.from('activities').insert({
+        'type': 'APROBADO',
+        'name': member['name'].toString(),
+      });
+
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('${member['name']} aprobado como ACTIVO'),
+          backgroundColor: ctx.colors.green,
+        ),
+      );
+
+      setState(() {
+        dismissedAlerts.remove('pendiente-$memberId');
+      });
+
+      await loadMembers();
+      await loadActivities();
+      await _saveLocalData();
+    } catch (e) {
+      debugPrint('❌ Error aprobando cliente: $e');
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CHECKIN CLIENTE
+  // ═══════════════════════════════════════════════════════════
+  Future<void> clientMarkEntry() async {
+    if (loggedClient == null) return;
+    await _clientCheckin('ENTRADA');
+  }
+
+  Future<void> clientMarkExit() async {
+    if (loggedClient == null) return;
+    await _clientCheckin('SALIDA');
+  }
+
+  Future<void> _clientCheckin(String type) async {
+    final client = loggedClient!;
+    final memberId = client['id'];
+    final memberName = client['name'].toString();
+
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final ctx = context;
+
+    try {
+      final supabase = Supabase.instance.client;
+
+      await supabase.from('checkins').insert({
+        'member_id': memberId,
+        'type': type,
+        'authorized': true,
+        'reason': null,
+      });
+
+      await supabase.from('activities').insert({
+        'type': type,
+        'name': memberName,
+      });
+
+      if (type == 'ENTRADA') {
+        final currentAttendance = (client['attendance'] as num?)?.toInt() ?? 0;
+        await supabase.from('members').update({
+          'attendance': currentAttendance + 1,
+          'last_visit': _formatDate(DateTime.now()),
+        }).eq('id', memberId);
+
+        if (!mounted) return;
+        setState(() {
+          loggedClient!['attendance'] = currentAttendance + 1;
+          loggedClient!['lastVisit'] = _formatDate(DateTime.now());
+          inside++;
+          clientInsideCount++;
+        });
+
+        await loadClientStreak();
+      } else {
+        if (!mounted) return;
+        setState(() {
+          if (clientInsideCount > 0) clientInsideCount--;
+        });
+      }
+
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(type == 'ENTRADA'
+              ? '¡Entrada registrada! Bienvenido 💪'
+              : '¡Salida registrada! Hasta pronto 👋'),
+          backgroundColor: ctx.colors.green,
+        ),
+      );
+
+      await loadActivities();
+      await loadCheckins();
+      await loadClientAforo();
+      await _saveLocalData();
+    } catch (e) {
+      debugPrint('❌ Error checkin cliente: $e');
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // REGISTRAR SALIDA ADMIN
+  // ═══════════════════════════════════════════════════════════
+  void registerExit() {
+    if (inside <= 0) return;
+
+    setState(() => inside--);
+
+    addActivity('SALIDA', 'Acceso registrado');
+    _saveLocalData();
+
+    if (!mounted) return;
+    final ctx = context;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      const SnackBar(
+        content: Text('Salida registrada correctamente'),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ESCÁNER QR
+  // ═══════════════════════════════════════════════════════════
+  void showAccessScanner() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          height: MediaQuery.of(sheetContext).size.height * 0.85,
+          decoration: BoxDecoration(
+            color: sheetContext.colors.bg,
+            borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(28),
+            ),
+          ),
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: sheetContext.colors.muted.withValues(alpha: .4),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.qr_code_scanner_rounded,
+                      color: sheetContext.colors.red,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'ESCANEAR ACCESO',
+                        style: TextStyle(
+                          color: sheetContext.colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: Icon(
+                        Icons.close_rounded,
+                        color: sheetContext.colors.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: MobileScanner(
+                    onDetect: (capture) async {
+                      final barcodes = capture.barcodes;
+                      if (barcodes.isEmpty) return;
+
+                      final code = barcodes.first.rawValue;
+                      if (code == null || code.isEmpty) return;
+
+                      Navigator.pop(sheetContext);
+                      await _processScannedCode(code);
+                    },
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Apunta el código QR del cliente al centro',
+                  style: TextStyle(
+                    color: sheetContext.colors.muted,
+                    fontSize: 12,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _processScannedCode(String code) async {
+    Map<String, dynamic>? found;
+    for (final m in members) {
+      if (m['qrCode'].toString() == code) {
+        found = m;
+        break;
+      }
+    }
+
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final ctx = context;
+
+    if (found == null) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('❌ Código no reconocido'),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+      return;
+    }
+
+    final status = found['status'].toString().toUpperCase();
+    if (status != 'ACTIVO') {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            '⛔ ${found['name']} no está ACTIVO ($status)',
+          ),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+      addActivity('BLOQUEADO', found['name'].toString());
+      return;
+    }
+
+    setState(() => inside++);
+    addActivity('ENTRADA', found['name'].toString());
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('✅ Acceso permitido: ${found['name']}'),
+        backgroundColor: ctx.colors.green,
+      ),
+    );
+
+    await _saveLocalData();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // INIT / DISPOSE
+  // ═══════════════════════════════════════════════════════════
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      generateGymQr();
+      await _loadLocalData();
+      if (mounted) {
+        setState(() => loadingData = false);
+      }
+      _syncWithSupabase();
+    });
+  }
+
+  @override
+  void dispose() {
+    _aforoTimer?.cancel();
+    searchController.dispose();
+    pinController.dispose();
+    clientCedulaController.dispose();
+    super.dispose();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // BUILD PRINCIPAL
+  // ═══════════════════════════════════════════════════════════
+  @override
+  Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 850;
+
+    // ── PANTALLA DE LOGIN ──
+    if (currentRole == UserRole.none) {
+      return _loginScreen();
+    }
+
+    // ── PANTALLA DE CLIENTE ──
+    if (currentRole == UserRole.client) {
+      return _clientHome();
+    }
+
+    // ── PANEL ADMIN ──
+    return Scaffold(
+      key: _scaffoldKey,
+      backgroundColor: context.colors.bg,
+      drawer: isMobile ? _mobileDrawer() : null,
+      body: isMobile ? _mobile() : _desktop(),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PANTALLA DE LOGIN
+  // ═══════════════════════════════════════════════════════════
+  Widget _loginScreen() {
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(28),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: context.colors.red,
+                    borderRadius: BorderRadius.circular(22),
+                    boxShadow: [
+                      BoxShadow(
+                        color: context.colors.red.withValues(alpha: .35),
+                        blurRadius: 30,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.bolt_rounded,
+                    color: Colors.black,
+                    size: 46,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Text(
+                  'SYNTHETIX',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 3,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'GYM OS PRO',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 2,
+                  ),
+                ),
+                const SizedBox(height: 40),
+                if (loginScreen == 'choose') ...[
+                  _button(
+                    'ENTRAR COMO ADMIN',
+                    context.colors.red,
+                    () => setState(() => loginScreen = 'admin'),
+                  ),
+                  const SizedBox(height: 12),
+                  _button(
+                    'ENTRAR COMO CLIENTE',
+                    context.colors.purple,
+                    () => setState(() => loginScreen = 'client'),
+                  ),
+                ] else if (loginScreen == 'admin') ...[
+                  TextField(
+                    controller: pinController,
+                    obscureText: true,
+                    keyboardType: TextInputType.number,
+                    maxLength: 4,
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontSize: 22,
+                      letterSpacing: 8,
+                      fontWeight: FontWeight.w900,
+                    ),
+                    textAlign: TextAlign.center,
+                    decoration: InputDecoration(
+                      counterText: '',
+                      hintText: '••••',
+                      hintStyle: TextStyle(
+                        color: context.colors.muted,
+                        letterSpacing: 8,
+                      ),
+                      filled: true,
+                      fillColor: context.colors.panel2,
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: context.colors.border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(
+                          color: context.colors.red,
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _button(
+                    isPinLocked
+                        ? 'BLOQUEADO ${pinLockSecondsLeft}s'
+                        : 'INGRESAR',
+                    context.colors.red,
+                    isPinLocked ? () {} : tryAdminLogin,
+                  ),
+                  const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () => setState(() => loginScreen = 'choose'),
+                    child: Text(
+                      'Volver',
+                      style: TextStyle(color: context.colors.muted),
+                    ),
+                  ),
+                ] else ...[
+                  TextField(
+                    controller: clientCedulaController,
+                    keyboardType: TextInputType.number,
+                    style: TextStyle(color: context.colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Cédula',
+                      labelStyle: TextStyle(color: context.colors.muted),
+                      filled: true,
+                      fillColor: context.colors.panel2,
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(color: context.colors.border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: BorderSide(
+                          color: context.colors.purple,
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _button(
+                    'INGRESAR',
+                    context.colors.purple,
+                    tryClientLogin,
+                  ),
+                  const SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () => setState(() => loginScreen = 'choose'),
+                    child: Text(
+                      'Volver',
+                      style: TextStyle(color: context.colors.muted),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HOME DEL CLIENTE
+  // ═══════════════════════════════════════════════════════════
+  Widget _clientHome() {
+    final client = loggedClient;
+    if (client == null) {
+      return Scaffold(
+        backgroundColor: context.colors.bg,
+        body: Center(
+          child: Text(
+            'Sin sesión',
+            style: TextStyle(color: context.colors.muted),
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      appBar: AppBar(
+        backgroundColor: context.colors.bg,
+        elevation: 0,
+        title: Text(
+          'Hola, ${client['name']}',
+          style: TextStyle(
+            color: context.colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        actions: [
+          IconButton(
+            onPressed: confirmLogout,
+            icon: Icon(
+              Icons.logout_rounded,
+              color: context.colors.red,
+            ),
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // AFORO
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'AFORO ACTUAL',
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Text(
+                        '$clientInsideCount',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 40,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        '/ $clientCapacity',
+                        style: TextStyle(
+                          color: context.colors.muted,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color:
+                              clientAforoColor(context).withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(30),
+                          border: Border.all(
+                            color: clientAforoColor(context)
+                                .withValues(alpha: .45),
+                          ),
+                        ),
+                        child: Text(
+                          clientAforoStatus,
+                          style: TextStyle(
+                            color: clientAforoColor(context),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // RACHA
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.local_fire_department_rounded,
+                    color: context.colors.orange,
+                    size: 36,
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'RACHA',
+                          style: TextStyle(
+                            color: context.colors.muted,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '$clientStreak ${clientStreak == 1 ? "día" : "días"}',
+                          style: TextStyle(
+                            color: context.colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // BOTONES DE CHECK-IN
+            Row(
+              children: [
+                Expanded(
+                  child: _button(
+                    'MARCAR ENTRADA',
+                    context.colors.green,
+                    clientMarkEntry,
+                    darkText: true,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _button(
+                    'MARCAR SALIDA',
+                    context.colors.yellow,
+                    clientMarkExit,
+                    darkText: true,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // INFO DEL PLAN
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'MI MEMBRESÍA',
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _infoRow('Plan', client['plan'].toString()),
+                  const SizedBox(height: 8),
+                  _infoRow('Vence', client['expiry'].toString()),
+                  const SizedBox(height: 8),
+                  _infoRow('Estado', client['status'].toString()),
+                  const SizedBox(height: 8),
+                  _infoRow('Asistencia', '${client['attendance']} visitas'),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ═══════════════════════════════════════════════════════════
   // CRUD MIEMBROS
   // ═══════════════════════════════════════════════════════════
-
   void addMember() {
     final name = TextEditingController();
     final phone = TextEditingController();
     final cedula = TextEditingController();
-
     String plan = plans.isNotEmpty ? plans.first['name'].toString() : '';
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO MIEMBRO',
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1541,12 +2818,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: plan.isEmpty ? null : plan,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Plan'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Plan'),
                     items: plans.map((p) {
                       final value = p['name'].toString();
-
                       return DropdownMenuItem<String>(
                         value: value,
                         child: Text(value),
@@ -1563,13 +2839,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'CREAR MIEMBRO',
-                    kRed,
+                    dialogContext.colors.red,
                     () async {
                       if (name.text.trim().isEmpty) return;
                       if (plan.isEmpty) return;
 
-                      final navigator = Navigator.of(context);
-                      final messenger = ScaffoldMessenger.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
 
                       final now = DateTime.now();
                       final expiryDate = _calculateExpiryDate(plan, now);
@@ -1600,13 +2877,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       });
 
                       addActivity('NUEVO MIEMBRO', name.text.trim());
-
                       navigator.pop();
 
                       messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('Miembro creado correctamente'),
-                          backgroundColor: kGreen,
+                        SnackBar(
+                          content: const Text('Miembro creado correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
 
@@ -1658,6 +2934,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void editMember(Map<String, dynamic> member) {
     final name = TextEditingController(text: member['name'].toString());
     final phone = TextEditingController(text: member['phone'].toString());
+    final cedula = TextEditingController(text: member['cedula'].toString());
     final expiry = TextEditingController(text: member['expiry'].toString());
 
     String plan = member['plan'].toString();
@@ -1665,12 +2942,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'EDITAR MIEMBRO',
-          accent: kYellow,
+          accent: dialogContext.colors.yellow,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1678,13 +2955,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   _field(phone, 'Teléfono'),
                   const SizedBox(height: 12),
+                  _field(cedula, 'Cédula'),
+                  const SizedBox(height: 12),
                   _field(expiry, 'Vencimiento (ej: 30 NOV 2026)'),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: plan,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Plan'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Plan'),
                     items: plans.map((p) {
                       final value = p['name'].toString();
                       return DropdownMenuItem<String>(
@@ -1703,22 +2982,17 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: status,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Estado'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Estado'),
                     items: const [
+                      DropdownMenuItem(value: 'ACTIVO', child: Text('ACTIVO')),
                       DropdownMenuItem(
-                        value: 'ACTIVO',
-                        child: Text('ACTIVO'),
-                      ),
+                          value: 'POR VENCER', child: Text('POR VENCER')),
                       DropdownMenuItem(
-                        value: 'POR VENCER',
-                        child: Text('POR VENCER'),
-                      ),
+                          value: 'VENCIDO', child: Text('VENCIDO')),
                       DropdownMenuItem(
-                        value: 'VENCIDO',
-                        child: Text('VENCIDO'),
-                      ),
+                          value: 'PENDIENTE', child: Text('PENDIENTE')),
                     ],
                     onChanged: (value) {
                       if (value != null) {
@@ -1731,29 +3005,31 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'GUARDAR CAMBIOS',
-                    kYellow,
+                    dialogContext.colors.yellow,
                     () async {
                       if (name.text.trim().isEmpty) return;
 
-                      final navigator = Navigator.of(context);
-                      final messenger = ScaffoldMessenger.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
 
                       setState(() {
                         member['name'] = name.text.trim();
                         member['phone'] = phone.text.trim();
+                        member['cedula'] = cedula.text.trim();
                         member['expiry'] = expiry.text.trim();
                         member['plan'] = plan;
                         member['status'] = status;
                       });
 
                       addActivity('EDITADO', name.text.trim());
-
                       navigator.pop();
 
                       messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('Miembro actualizado correctamente'),
-                          backgroundColor: kGreen,
+                        SnackBar(
+                          content:
+                              const Text('Miembro actualizado correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
 
@@ -1767,10 +3043,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                       try {
                         final supabase = Supabase.instance.client;
-
                         await supabase.from('members').update({
                           'name': name.text.trim(),
                           'phone': phone.text.trim(),
+                          'cedula': cedula.text.trim(),
                           'expiry': expiry.text.trim(),
                           'plan': plan,
                           'status': status,
@@ -1802,56 +3078,50 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void deleteMember(Map<String, dynamic> member) {
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'ELIMINAR MIEMBRO',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.warning_amber_rounded,
-                color: kRed,
-                size: 60,
-              ),
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
               const SizedBox(height: 18),
               Text(
                 '¿Eliminar a ${member['name']}?',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
                 ),
               ),
               const SizedBox(height: 8),
-              const Text(
+              Text(
                 'Esta acción no se puede deshacer.',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: kMuted,
-                  fontSize: 13,
-                ),
+                style:
+                    TextStyle(color: dialogContext.colors.muted, fontSize: 13),
               ),
               const SizedBox(height: 24),
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(dialogContext),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),
-                        side: const BorderSide(color: kBorder),
+                        side: BorderSide(color: dialogContext.colors.border),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-                      child: const Text(
+                      child: Text(
                         'CANCELAR',
                         style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                        ),
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),
@@ -1859,8 +3129,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
-                        final messenger = ScaffoldMessenger.of(context);
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
                         final memberId = member['id'];
 
                         setState(() {
@@ -1869,13 +3140,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         });
 
                         addActivity('ELIMINADO', member['name'].toString());
-
                         navigator.pop();
 
                         messenger.showSnackBar(
                           SnackBar(
                             content: Text('${member['name']} eliminado'),
-                            backgroundColor: kGreen,
+                            backgroundColor: ctx.colors.green,
                           ),
                         );
 
@@ -1888,7 +3158,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                         try {
                           final supabase = Supabase.instance.client;
-
                           await supabase
                               .from('members')
                               .delete()
@@ -1907,7 +3176,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         }
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: kRed,
+                        backgroundColor: dialogContext.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 15),
                         shape: RoundedRectangleBorder(
@@ -1932,13 +3201,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   // ═══════════════════════════════════════════════════════════
   // CRUD PAGOS
   // ═══════════════════════════════════════════════════════════
-
   void newPayment() {
     if (members.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No hay miembros registrados'),
-          backgroundColor: kRed,
+      final ctx = context;
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('No hay miembros registrados'),
+          backgroundColor: ctx.colors.red,
         ),
       );
       return;
@@ -1950,22 +3219,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO PAGO',
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   DropdownButtonFormField<String>(
                     value: memberName,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Miembro'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Miembro'),
                     items: members.map((m) {
                       final value = m['name'].toString();
-
                       return DropdownMenuItem<String>(
                         value: value,
                         child: Text(value),
@@ -1980,30 +3248,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     },
                   ),
                   const SizedBox(height: 12),
-                  _field(
-                    amount,
-                    'Importe',
-                    keyboard: TextInputType.number,
-                  ),
+                  _field(amount, 'Importe', keyboard: TextInputType.number),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: method,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Método de pago'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration:
+                        _inputDecoration(dialogContext, 'Método de pago'),
                     items: const [
                       DropdownMenuItem(
-                        value: 'EFECTIVO',
-                        child: Text('EFECTIVO'),
-                      ),
+                          value: 'EFECTIVO', child: Text('EFECTIVO')),
                       DropdownMenuItem(
-                        value: 'TARJETA',
-                        child: Text('TARJETA'),
-                      ),
+                          value: 'TARJETA', child: Text('TARJETA')),
                       DropdownMenuItem(
-                        value: 'TRANSFERENCIA',
-                        child: Text('TRANSFERENCIA'),
-                      ),
+                          value: 'TRANSFERENCIA', child: Text('TRANSFERENCIA')),
                     ],
                     onChanged: (value) {
                       if (value != null) {
@@ -2016,7 +3275,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'REGISTRAR PAGO',
-                    kYellow,
+                    dialogContext.colors.yellow,
                     () async {
                       final value = double.tryParse(
                         amount.text.replaceAll(',', '.'),
@@ -2031,8 +3290,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                       if (memberData.isEmpty) return;
 
-                      final navigator = Navigator.of(context);
-                      final messenger = ScaffoldMessenger.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
 
                       final currentPayments =
                           (memberData['payments'] as num?)?.toInt() ?? 0;
@@ -2063,13 +3323,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       });
 
                       addActivity('PAGO', memberName);
-
                       navigator.pop();
 
                       messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('Pago registrado correctamente'),
-                          backgroundColor: kGreen,
+                        SnackBar(
+                          content: const Text('Pago registrado correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
 
@@ -2083,7 +3342,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                       try {
                         final supabase = Supabase.instance.client;
-
                         await supabase.from('payments').insert({
                           'member_id': memberId,
                           'amount': value,
@@ -2124,7 +3382,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   // ═══════════════════════════════════════════════════════════
   // CRUD PLANES
   // ═══════════════════════════════════════════════════════════
-
   void addPlan() {
     final name = TextEditingController();
     final price = TextEditingController();
@@ -2133,7 +3390,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO PLAN',
           child: Column(
@@ -2141,35 +3398,26 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             children: [
               _field(name, 'Nombre del plan'),
               const SizedBox(height: 12),
-              _field(
-                price,
-                'Precio',
-                keyboard: TextInputType.number,
-              ),
+              _field(price, 'Precio', keyboard: TextInputType.number),
               const SizedBox(height: 12),
-              _field(
-                days,
-                'Días de vigencia',
-                keyboard: TextInputType.number,
-              ),
+              _field(days, 'Días de vigencia', keyboard: TextInputType.number),
               const SizedBox(height: 12),
               _field(access, 'Tipo de acceso'),
               const SizedBox(height: 24),
               _button(
                 'CREAR PLAN',
-                kPurple,
+                dialogContext.colors.purple,
                 () async {
-                  final p = double.tryParse(
-                    price.text.replaceAll(',', '.'),
-                  );
+                  final p = double.tryParse(price.text.replaceAll(',', '.'));
                   final d = int.tryParse(days.text);
 
                   if (name.text.trim().isEmpty || p == null || d == null) {
                     return;
                   }
 
-                  final navigator = Navigator.of(context);
-                  final messenger = ScaffoldMessenger.of(context);
+                  final navigator = Navigator.of(dialogContext);
+                  final messenger = ScaffoldMessenger.of(dialogContext);
+                  final ctx = dialogContext;
 
                   final now = DateTime.now();
                   final localPlan = {
@@ -2189,9 +3437,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   navigator.pop();
 
                   messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('Plan creado correctamente'),
-                      backgroundColor: kGreen,
+                    SnackBar(
+                      content: const Text('Plan creado correctamente'),
+                      backgroundColor: ctx.colors.green,
                     ),
                   );
 
@@ -2199,7 +3447,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                   try {
                     final supabase = Supabase.instance.client;
-
                     await supabase.from('plans').insert({
                       'name': name.text.trim(),
                       'price': p,
@@ -2231,44 +3478,35 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'EDITAR PLAN',
-          accent: kPurple,
+          accent: dialogContext.colors.purple,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               _field(name, 'Nombre del plan'),
               const SizedBox(height: 12),
-              _field(
-                price,
-                'Precio',
-                keyboard: TextInputType.number,
-              ),
+              _field(price, 'Precio', keyboard: TextInputType.number),
               const SizedBox(height: 12),
-              _field(
-                days,
-                'Días de vigencia',
-                keyboard: TextInputType.number,
-              ),
+              _field(days, 'Días de vigencia', keyboard: TextInputType.number),
               const SizedBox(height: 12),
               _field(access, 'Tipo de acceso'),
               const SizedBox(height: 24),
               _button(
                 'GUARDAR CAMBIOS',
-                kPurple,
+                dialogContext.colors.purple,
                 () async {
-                  final p = double.tryParse(
-                    price.text.replaceAll(',', '.'),
-                  );
+                  final p = double.tryParse(price.text.replaceAll(',', '.'));
                   final d = int.tryParse(days.text);
 
                   if (name.text.trim().isEmpty || p == null || d == null) {
                     return;
                   }
 
-                  final navigator = Navigator.of(context);
-                  final messenger = ScaffoldMessenger.of(context);
+                  final navigator = Navigator.of(dialogContext);
+                  final messenger = ScaffoldMessenger.of(dialogContext);
+                  final ctx = dialogContext;
 
                   setState(() {
                     plan['name'] = name.text.trim();
@@ -2280,9 +3518,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   navigator.pop();
 
                   messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('Plan actualizado correctamente'),
-                      backgroundColor: kGreen,
+                    SnackBar(
+                      content: const Text('Plan actualizado correctamente'),
+                      backgroundColor: ctx.colors.green,
                     ),
                   );
 
@@ -2296,7 +3534,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                   try {
                     final supabase = Supabase.instance.client;
-
                     await supabase.from('plans').update({
                       'name': name.text.trim(),
                       'price': p,
@@ -2321,35 +3558,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void deletePlan(Map<String, dynamic> plan) {
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'ELIMINAR PLAN',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.warning_amber_rounded,
-                color: kRed,
-                size: 60,
-              ),
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
               const SizedBox(height: 18),
               Text(
                 '¿Eliminar el plan "${plan['name']}"?',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Los miembros con este plan no se verán afectados.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: kMuted,
-                  fontSize: 13,
                 ),
               ),
               const SizedBox(height: 24),
@@ -2357,20 +3582,19 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(dialogContext),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),
-                        side: const BorderSide(color: kBorder),
+                        side: BorderSide(color: dialogContext.colors.border),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-                      child: const Text(
+                      child: Text(
                         'CANCELAR',
                         style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                        ),
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),
@@ -2378,8 +3602,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
-                        final messenger = ScaffoldMessenger.of(context);
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
                         final planId = plan['id'];
 
                         setState(() {
@@ -2391,7 +3616,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         messenger.showSnackBar(
                           SnackBar(
                             content: Text('Plan "${plan['name']}" eliminado'),
-                            backgroundColor: kGreen,
+                            backgroundColor: ctx.colors.green,
                           ),
                         );
 
@@ -2404,7 +3629,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
                         try {
                           final supabase = Supabase.instance.client;
-
                           await supabase
                               .from('plans')
                               .delete()
@@ -2417,7 +3641,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         }
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: kRed,
+                        backgroundColor: dialogContext.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 15),
                         shape: RoundedRectangleBorder(
@@ -2440,9 +3664,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // CRUD RUTINAS (SOLO LOCAL)
+  // CRUD RUTINAS
   // ═══════════════════════════════════════════════════════════
-
   void addRoutine() {
     final name = TextEditingController();
     final duration = TextEditingController(text: '45');
@@ -2452,12 +3675,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVA RUTINA',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2471,9 +3694,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: level,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Nivel'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Nivel'),
                     items: const [
                       DropdownMenuItem(
                           value: 'Principiante', child: Text('Principiante')),
@@ -2491,10 +3714,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'CREAR RUTINA',
-                    kRed,
+                    dialogContext.colors.red,
                     () async {
                       if (name.text.trim().isEmpty) return;
-                      final navigator = Navigator.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
                       final now = DateTime.now();
 
                       setState(() {
@@ -2514,11 +3739,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       navigator.pop();
                       await _saveLocalData();
 
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Rutina creada correctamente'),
-                          backgroundColor: kGreen,
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: const Text('Rutina creada correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
                     },
@@ -2544,12 +3768,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'EDITAR RUTINA',
-          accent: kYellow,
+          accent: dialogContext.colors.yellow,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2563,9 +3787,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: level,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Nivel'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Nivel'),
                     items: const [
                       DropdownMenuItem(
                           value: 'Principiante', child: Text('Principiante')),
@@ -2583,10 +3807,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'GUARDAR CAMBIOS',
-                    kYellow,
+                    dialogContext.colors.yellow,
                     () async {
                       if (name.text.trim().isEmpty) return;
-                      final navigator = Navigator.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
 
                       setState(() {
                         routine['name'] = name.text.trim();
@@ -2600,11 +3826,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       navigator.pop();
                       await _saveLocalData();
 
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Rutina actualizada correctamente'),
-                          backgroundColor: kGreen,
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content:
+                              const Text('Rutina actualizada correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
                     },
@@ -2622,20 +3848,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void deleteRoutine(Map<String, dynamic> routine) {
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'ELIMINAR RUTINA',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.warning_amber_rounded, color: kRed, size: 60),
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
               const SizedBox(height: 18),
               Text(
                 '¿Eliminar "${routine['name']}"?',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
                 ),
@@ -2645,20 +3872,19 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(dialogContext),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),
-                        side: const BorderSide(color: kBorder),
+                        side: BorderSide(color: dialogContext.colors.border),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-                      child: const Text(
+                      child: Text(
                         'CANCELAR',
                         style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                        ),
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),
@@ -2666,21 +3892,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
                         setState(() => routines.remove(routine));
                         navigator.pop();
                         await _saveLocalData();
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
+
+                        messenger.showSnackBar(
                           SnackBar(
                             content:
                                 Text('Rutina "${routine['name']}" eliminada'),
-                            backgroundColor: kGreen,
+                            backgroundColor: ctx.colors.green,
                           ),
                         );
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: kRed,
+                        backgroundColor: dialogContext.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 15),
                         shape: RoundedRectangleBorder(
@@ -2703,9 +3931,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // CRUD EJERCICIOS (SOLO LOCAL)
+  // CRUD EJERCICIOS
   // ═══════════════════════════════════════════════════════════
-
   void addExercise() {
     final name = TextEditingController();
     final sets = TextEditingController(text: '3');
@@ -2716,12 +3943,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO EJERCICIO',
-          accent: kPurple,
+          accent: dialogContext.colors.purple,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2729,9 +3956,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: muscle,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Músculo'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Músculo'),
                     items: const [
                       DropdownMenuItem(value: 'Pecho', child: Text('Pecho')),
                       DropdownMenuItem(
@@ -2756,9 +3983,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: level,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Nivel'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Nivel'),
                     items: const [
                       DropdownMenuItem(
                           value: 'Principiante', child: Text('Principiante')),
@@ -2774,10 +4001,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'CREAR EJERCICIO',
-                    kPurple,
+                    dialogContext.colors.purple,
                     () async {
                       if (name.text.trim().isEmpty) return;
-                      final navigator = Navigator.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
                       final now = DateTime.now();
 
                       setState(() {
@@ -2795,11 +4024,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       navigator.pop();
                       await _saveLocalData();
 
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Ejercicio creado correctamente'),
-                          backgroundColor: kGreen,
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: const Text('Ejercicio creado correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
                     },
@@ -2823,12 +4051,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'EDITAR EJERCICIO',
-          accent: kYellow,
+          accent: dialogContext.colors.yellow,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2836,9 +4064,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: muscle,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Músculo'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Músculo'),
                     items: const [
                       DropdownMenuItem(value: 'Pecho', child: Text('Pecho')),
                       DropdownMenuItem(
@@ -2863,9 +4091,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: level,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Nivel'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Nivel'),
                     items: const [
                       DropdownMenuItem(
                           value: 'Principiante', child: Text('Principiante')),
@@ -2881,10 +4109,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'GUARDAR CAMBIOS',
-                    kYellow,
+                    dialogContext.colors.yellow,
                     () async {
                       if (name.text.trim().isEmpty) return;
-                      final navigator = Navigator.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
 
                       setState(() {
                         exercise['name'] = name.text.trim();
@@ -2899,11 +4129,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       navigator.pop();
                       await _saveLocalData();
 
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Ejercicio actualizado correctamente'),
-                          backgroundColor: kGreen,
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content:
+                              const Text('Ejercicio actualizado correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
                     },
@@ -2921,20 +4151,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void deleteExercise(Map<String, dynamic> exercise) {
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'ELIMINAR EJERCICIO',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.warning_amber_rounded, color: kRed, size: 60),
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
               const SizedBox(height: 18),
               Text(
                 '¿Eliminar "${exercise['name']}"?',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
                 ),
@@ -2944,20 +4175,19 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(dialogContext),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),
-                        side: const BorderSide(color: kBorder),
+                        side: BorderSide(color: dialogContext.colors.border),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-                      child: const Text(
+                      child: Text(
                         'CANCELAR',
                         style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                        ),
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),
@@ -2965,21 +4195,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
                         setState(() => exercises.remove(exercise));
                         navigator.pop();
                         await _saveLocalData();
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
+
+                        messenger.showSnackBar(
                           SnackBar(
                             content: Text(
                                 'Ejercicio "${exercise['name']}" eliminado'),
-                            backgroundColor: kGreen,
+                            backgroundColor: ctx.colors.green,
                           ),
                         );
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: kRed,
+                        backgroundColor: dialogContext.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 15),
                         shape: RoundedRectangleBorder(
@@ -3002,13 +4234,874 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // CRUD CLASES (SOLO LOCAL)
+  // CRUD ENTRENADORES
   // ═══════════════════════════════════════════════════════════
+  void addTrainer() {
+    final name = TextEditingController();
+    final specialty = TextEditingController();
+    final phone = TextEditingController();
+    final clientsCtrl = TextEditingController(text: '0');
+    final schedule = TextEditingController(text: '06:00 - 14:00');
+    double rating = 5.0;
 
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'NUEVO ENTRENADOR',
+          accent: dialogContext.colors.green,
+          child: StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _field(name, 'Nombre completo'),
+                  const SizedBox(height: 12),
+                  _field(specialty, 'Especialidad'),
+                  const SizedBox(height: 12),
+                  _field(phone, 'Teléfono'),
+                  const SizedBox(height: 12),
+                  _field(clientsCtrl, 'Cantidad de clientes',
+                      keyboard: TextInputType.number),
+                  const SizedBox(height: 12),
+                  _field(schedule, 'Horario (ej: 06:00 - 14:00)'),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: dialogContext.colors.panel2,
+                      borderRadius: BorderRadius.circular(13),
+                      border: Border.all(color: dialogContext.colors.border),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.star_rounded,
+                                color: dialogContext.colors.yellow, size: 18),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Rating',
+                              style: TextStyle(
+                                color: dialogContext.colors.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              rating.toStringAsFixed(1),
+                              style: TextStyle(
+                                color: dialogContext.colors.yellow,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: rating,
+                          min: 1,
+                          max: 5,
+                          divisions: 40,
+                          activeColor: dialogContext.colors.yellow,
+                          inactiveColor: dialogContext.colors.border,
+                          label: rating.toStringAsFixed(1),
+                          onChanged: (v) {
+                            setDialogState(() => rating = v);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  _button(
+                    'CREAR ENTRENADOR',
+                    dialogContext.colors.green,
+                    () async {
+                      if (name.text.trim().isEmpty) return;
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
+                      final now = DateTime.now();
+
+                      setState(() {
+                        trainers.add({
+                          'id': 't-${now.millisecondsSinceEpoch}',
+                          'name': name.text.trim(),
+                          'specialty': specialty.text.trim().isEmpty
+                              ? 'General'
+                              : specialty.text.trim(),
+                          'phone': phone.text.trim().isEmpty
+                              ? '+00 000 000000'
+                              : phone.text.trim(),
+                          'clients': int.tryParse(clientsCtrl.text) ?? 0,
+                          'rating': rating,
+                          'schedule': schedule.text.trim().isEmpty
+                              ? '06:00 - 14:00'
+                              : schedule.text.trim(),
+                        });
+                      });
+
+                      navigator.pop();
+                      await _saveLocalData();
+
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content:
+                              const Text('Entrenador creado correctamente'),
+                          backgroundColor: ctx.colors.green,
+                        ),
+                      );
+                    },
+                    darkText: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void editTrainer(Map<String, dynamic> trainer) {
+    final name = TextEditingController(text: trainer['name'].toString());
+    final specialty =
+        TextEditingController(text: trainer['specialty'].toString());
+    final phone = TextEditingController(text: trainer['phone'].toString());
+    final clientsCtrl =
+        TextEditingController(text: trainer['clients'].toString());
+    final schedule =
+        TextEditingController(text: trainer['schedule'].toString());
+    double rating = (trainer['rating'] as num?)?.toDouble() ?? 5.0;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'EDITAR ENTRENADOR',
+          accent: dialogContext.colors.yellow,
+          child: StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _field(name, 'Nombre completo'),
+                  const SizedBox(height: 12),
+                  _field(specialty, 'Especialidad'),
+                  const SizedBox(height: 12),
+                  _field(phone, 'Teléfono'),
+                  const SizedBox(height: 12),
+                  _field(clientsCtrl, 'Cantidad de clientes',
+                      keyboard: TextInputType.number),
+                  const SizedBox(height: 12),
+                  _field(schedule, 'Horario'),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: dialogContext.colors.panel2,
+                      borderRadius: BorderRadius.circular(13),
+                      border: Border.all(color: dialogContext.colors.border),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.star_rounded,
+                                color: dialogContext.colors.yellow, size: 18),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Rating',
+                              style: TextStyle(
+                                color: dialogContext.colors.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              rating.toStringAsFixed(1),
+                              style: TextStyle(
+                                color: dialogContext.colors.yellow,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Slider(
+                          value: rating,
+                          min: 1,
+                          max: 5,
+                          divisions: 40,
+                          activeColor: dialogContext.colors.yellow,
+                          inactiveColor: dialogContext.colors.border,
+                          label: rating.toStringAsFixed(1),
+                          onChanged: (v) {
+                            setDialogState(() => rating = v);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  _button(
+                    'GUARDAR CAMBIOS',
+                    dialogContext.colors.yellow,
+                    () async {
+                      if (name.text.trim().isEmpty) return;
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
+
+                      setState(() {
+                        trainer['name'] = name.text.trim();
+                        trainer['specialty'] = specialty.text.trim();
+                        trainer['phone'] = phone.text.trim();
+                        trainer['clients'] =
+                            int.tryParse(clientsCtrl.text) ?? 0;
+                        trainer['rating'] = rating;
+                        trainer['schedule'] = schedule.text.trim();
+                      });
+
+                      navigator.pop();
+                      await _saveLocalData();
+
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: const Text(
+                              'Entrenador actualizado correctamente'),
+                          backgroundColor: ctx.colors.green,
+                        ),
+                      );
+                    },
+                    darkText: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void deleteTrainer(Map<String, dynamic> trainer) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'ELIMINAR ENTRENADOR',
+          accent: dialogContext.colors.red,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
+              const SizedBox(height: 18),
+              Text(
+                '¿Eliminar a ${trainer['name']}?',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        side: BorderSide(color: dialogContext.colors.border),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                      ),
+                      child: Text(
+                        'CANCELAR',
+                        style: TextStyle(
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
+                        setState(() => trainers.remove(trainer));
+                        navigator.pop();
+                        await _saveLocalData();
+
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text('${trainer['name']} eliminado'),
+                            backgroundColor: ctx.colors.green,
+                          ),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: dialogContext.colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                      ),
+                      child: const Text(
+                        'ELIMINAR',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CRUD TIPOS DE CLASE
+  // ═══════════════════════════════════════════════════════════
+  void addClassType() {
+    final name = TextEditingController();
+    int selectedColor = 0xFFB000FF;
+    int selectedIcon = 0xe4a4;
+
+    final availableColors = [
+      0xFFB000FF,
+      0xFFFFEA00,
+      0xFFFF1744,
+      0xFF00FF85,
+      0xFF00E0FF,
+      0xFFFF7A00,
+      0xFF2FB8FF,
+      0xFFB4FF39,
+    ];
+
+    final availableIcons = [
+      {'code': 0xe4a4, 'icon': Icons.self_improvement},
+      {'code': 0xe4a7, 'icon': Icons.directions_bike},
+      {'code': 0xe4a8, 'icon': Icons.fitness_center},
+      {'code': 0xe4a9, 'icon': Icons.sports_mma},
+      {'code': 0xe4aa, 'icon': Icons.accessibility_new},
+      {'code': 0xe4ab, 'icon': Icons.sports_gymnastics},
+      {'code': 0xe4ac, 'icon': Icons.sports_martial_arts},
+      {'code': 0xe4ad, 'icon': Icons.sports_handball},
+    ];
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'NUEVO TIPO DE CLASE',
+          accent: dialogContext.colors.orange,
+          child: StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _field(name, 'Nombre (ej: YOGA, BOXEO)'),
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: dialogContext.colors.panel2,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: dialogContext.colors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            color: Color(selectedColor).withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color:
+                                  Color(selectedColor).withValues(alpha: .35),
+                            ),
+                          ),
+                          child: Icon(
+                            _iconFromCodePoint(selectedIcon),
+                            color: Color(selectedColor),
+                            size: 26,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            name.text.isEmpty
+                                ? 'VISTA PREVIA'
+                                : name.text.toUpperCase(),
+                            style: TextStyle(
+                              color: dialogContext.colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'COLOR',
+                      style: TextStyle(
+                        color: dialogContext.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: availableColors.map((c) {
+                      final selected = selectedColor == c;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => selectedColor = c),
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: Color(c),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: selected
+                                  ? dialogContext.colors.white
+                                  : Colors.transparent,
+                              width: 3,
+                            ),
+                          ),
+                          child: selected
+                              ? const Icon(
+                                  Icons.check_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                )
+                              : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 20),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'ICONO',
+                      style: TextStyle(
+                        color: dialogContext.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: availableIcons.map((ic) {
+                      final code = ic['code'] as int;
+                      final iconData = ic['icon'] as IconData;
+                      final selected = selectedIcon == code;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => selectedIcon = code),
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: selected
+                                ? Color(selectedColor).withValues(alpha: .20)
+                                : dialogContext.colors.panel2,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: selected
+                                  ? Color(selectedColor)
+                                  : dialogContext.colors.border,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            iconData,
+                            color: selected
+                                ? Color(selectedColor)
+                                : dialogContext.colors.muted,
+                            size: 22,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  _button(
+                    'CREAR TIPO',
+                    dialogContext.colors.orange,
+                    () async {
+                      if (name.text.trim().isEmpty) return;
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
+                      final now = DateTime.now();
+
+                      setState(() {
+                        classTypes.add({
+                          'id': 'ct-${now.millisecondsSinceEpoch}',
+                          'name': name.text.trim().toUpperCase(),
+                          'color': selectedColor,
+                          'icon': selectedIcon,
+                        });
+                      });
+
+                      navigator.pop();
+                      await _saveLocalData();
+
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content:
+                              const Text('Tipo de clase creado correctamente'),
+                          backgroundColor: ctx.colors.green,
+                        ),
+                      );
+                    },
+                    darkText: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void editClassType(Map<String, dynamic> ct) {
+    final name = TextEditingController(text: ct['name'].toString());
+    int selectedColor = ct['color'] as int;
+    int selectedIcon = ct['icon'] as int;
+
+    final availableColors = [
+      0xFFB000FF,
+      0xFFFFEA00,
+      0xFFFF1744,
+      0xFF00FF85,
+      0xFF00E0FF,
+      0xFFFF7A00,
+      0xFF2FB8FF,
+      0xFFB4FF39,
+    ];
+
+    final availableIcons = [
+      {'code': 0xe4a4, 'icon': Icons.self_improvement},
+      {'code': 0xe4a7, 'icon': Icons.directions_bike},
+      {'code': 0xe4a8, 'icon': Icons.fitness_center},
+      {'code': 0xe4a9, 'icon': Icons.sports_mma},
+      {'code': 0xe4aa, 'icon': Icons.accessibility_new},
+      {'code': 0xe4ab, 'icon': Icons.sports_gymnastics},
+      {'code': 0xe4ac, 'icon': Icons.sports_martial_arts},
+      {'code': 0xe4ad, 'icon': Icons.sports_handball},
+    ];
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'EDITAR TIPO DE CLASE',
+          accent: dialogContext.colors.yellow,
+          child: StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _field(name, 'Nombre'),
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: dialogContext.colors.panel2,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: dialogContext.colors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            color: Color(selectedColor).withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color:
+                                  Color(selectedColor).withValues(alpha: .35),
+                            ),
+                          ),
+                          child: Icon(
+                            _iconFromCodePoint(selectedIcon),
+                            color: Color(selectedColor),
+                            size: 26,
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            name.text.isEmpty
+                                ? 'VISTA PREVIA'
+                                : name.text.toUpperCase(),
+                            style: TextStyle(
+                              color: dialogContext.colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'COLOR',
+                      style: TextStyle(
+                        color: dialogContext.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: availableColors.map((c) {
+                      final selected = selectedColor == c;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => selectedColor = c),
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: Color(c),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: selected
+                                  ? dialogContext.colors.white
+                                  : Colors.transparent,
+                              width: 3,
+                            ),
+                          ),
+                          child: selected
+                              ? const Icon(
+                                  Icons.check_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                )
+                              : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 20),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'ICONO',
+                      style: TextStyle(
+                        color: dialogContext.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: availableIcons.map((ic) {
+                      final code = ic['code'] as int;
+                      final iconData = ic['icon'] as IconData;
+                      final selected = selectedIcon == code;
+                      return GestureDetector(
+                        onTap: () => setDialogState(() => selectedIcon = code),
+                        child: Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: selected
+                                ? Color(selectedColor).withValues(alpha: .20)
+                                : dialogContext.colors.panel2,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: selected
+                                  ? Color(selectedColor)
+                                  : dialogContext.colors.border,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            iconData,
+                            color: selected
+                                ? Color(selectedColor)
+                                : dialogContext.colors.muted,
+                            size: 22,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 24),
+                  _button(
+                    'GUARDAR CAMBIOS',
+                    dialogContext.colors.yellow,
+                    () async {
+                      if (name.text.trim().isEmpty) return;
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
+
+                      setState(() {
+                        ct['name'] = name.text.trim().toUpperCase();
+                        ct['color'] = selectedColor;
+                        ct['icon'] = selectedIcon;
+                      });
+
+                      navigator.pop();
+                      await _saveLocalData();
+
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: const Text('Tipo actualizado correctamente'),
+                          backgroundColor: ctx.colors.green,
+                        ),
+                      );
+                    },
+                    darkText: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void deleteClassType(Map<String, dynamic> ct) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'ELIMINAR TIPO',
+          accent: dialogContext.colors.red,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
+              const SizedBox(height: 18),
+              Text(
+                '¿Eliminar "${ct['name']}"?',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(dialogContext),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        side: BorderSide(color: dialogContext.colors.border),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                      ),
+                      child: Text(
+                        'CANCELAR',
+                        style: TextStyle(
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () async {
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
+                        setState(() => classTypes.remove(ct));
+                        navigator.pop();
+                        await _saveLocalData();
+
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text('Tipo "${ct['name']}" eliminado'),
+                            backgroundColor: ctx.colors.green,
+                          ),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: dialogContext.colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                      ),
+                      child: const Text(
+                        'ELIMINAR',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CRUD CLASES
+  // ═══════════════════════════════════════════════════════════
   void addClass() {
     final name = TextEditingController();
     final capacityCtrl = TextEditingController(text: '20');
-    String type = 'YOGA';
+    String type =
+        classTypes.isNotEmpty ? classTypes.first['name'].toString() : 'YOGA';
     String day = 'LUNES';
     String time = '08:00';
     String trainerName =
@@ -3016,12 +5109,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'NUEVA CLASE',
-          accent: kGreen,
+          accent: dialogContext.colors.green,
           child: StatefulBuilder(
-            builder: (context, setDialogState) {
+            builder: (dialogContext, setDialogState) {
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -3029,19 +5122,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: type,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Tipo'),
-                    items: const [
-                      DropdownMenuItem(value: 'YOGA', child: Text('Yoga')),
-                      DropdownMenuItem(
-                          value: 'SPINNING', child: Text('Spinning')),
-                      DropdownMenuItem(
-                          value: 'CROSSFIT', child: Text('CrossFit')),
-                      DropdownMenuItem(value: 'BOXEO', child: Text('Boxeo')),
-                      DropdownMenuItem(
-                          value: 'PILATES', child: Text('Pilates')),
-                    ],
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Tipo'),
+                    items: classTypes.map((ct) {
+                      final value = ct['name'].toString();
+                      return DropdownMenuItem(value: value, child: Text(value));
+                    }).toList(),
                     onChanged: (v) {
                       if (v != null) setDialogState(() => type = v);
                     },
@@ -3049,9 +5136,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: day,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Día'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Día'),
                     items: const [
                       DropdownMenuItem(value: 'LUNES', child: Text('Lunes')),
                       DropdownMenuItem(value: 'MARTES', child: Text('Martes')),
@@ -3068,14 +5155,18 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: time,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Hora'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Hora'),
                     items: const [
                       DropdownMenuItem(value: '06:00', child: Text('06:00')),
                       DropdownMenuItem(value: '08:00', child: Text('08:00')),
+                      DropdownMenuItem(value: '10:00', child: Text('10:00')),
                       DropdownMenuItem(value: '12:00', child: Text('12:00')),
+                      DropdownMenuItem(value: '14:00', child: Text('14:00')),
+                      DropdownMenuItem(value: '16:00', child: Text('16:00')),
                       DropdownMenuItem(value: '18:00', child: Text('18:00')),
+                      DropdownMenuItem(value: '20:00', child: Text('20:00')),
                     ],
                     onChanged: (v) {
                       if (v != null) setDialogState(() => time = v);
@@ -3084,9 +5175,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     value: trainerName.isEmpty ? null : trainerName,
-                    dropdownColor: kPanel2,
-                    style: const TextStyle(color: kWhite),
-                    decoration: _inputDecoration('Entrenador'),
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Entrenador'),
                     items: trainers.map((t) {
                       final value = t['name'].toString();
                       return DropdownMenuItem(value: value, child: Text(value));
@@ -3101,10 +5192,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 24),
                   _button(
                     'CREAR CLASE',
-                    kGreen,
+                    dialogContext.colors.green,
                     () async {
                       if (name.text.trim().isEmpty) return;
-                      final navigator = Navigator.of(context);
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
                       final now = DateTime.now();
 
                       setState(() {
@@ -3125,11 +5218,143 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       navigator.pop();
                       await _saveLocalData();
 
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Clase creada correctamente'),
-                          backgroundColor: kGreen,
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: const Text('Clase creada correctamente'),
+                          backgroundColor: ctx.colors.green,
+                        ),
+                      );
+                    },
+                    darkText: true,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  void editClass(Map<String, dynamic> classItem) {
+    final name = TextEditingController(text: classItem['name'].toString());
+    final capacityCtrl =
+        TextEditingController(text: classItem['capacity'].toString());
+    String type = classItem['type'].toString();
+    String day = classItem['day'].toString();
+    String time = classItem['time'].toString();
+    String trainerName = classItem['trainer'].toString();
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'EDITAR CLASE',
+          accent: dialogContext.colors.yellow,
+          child: StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _field(name, 'Nombre de la clase'),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: type,
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Tipo'),
+                    items: classTypes.map((ct) {
+                      final value = ct['name'].toString();
+                      return DropdownMenuItem(value: value, child: Text(value));
+                    }).toList(),
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => type = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: day,
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Día'),
+                    items: const [
+                      DropdownMenuItem(value: 'LUNES', child: Text('Lunes')),
+                      DropdownMenuItem(value: 'MARTES', child: Text('Martes')),
+                      DropdownMenuItem(
+                          value: 'MIÉRCOLES', child: Text('Miércoles')),
+                      DropdownMenuItem(value: 'JUEVES', child: Text('Jueves')),
+                      DropdownMenuItem(
+                          value: 'VIERNES', child: Text('Viernes')),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => day = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: time,
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Hora'),
+                    items: const [
+                      DropdownMenuItem(value: '06:00', child: Text('06:00')),
+                      DropdownMenuItem(value: '08:00', child: Text('08:00')),
+                      DropdownMenuItem(value: '10:00', child: Text('10:00')),
+                      DropdownMenuItem(value: '12:00', child: Text('12:00')),
+                      DropdownMenuItem(value: '14:00', child: Text('14:00')),
+                      DropdownMenuItem(value: '16:00', child: Text('16:00')),
+                      DropdownMenuItem(value: '18:00', child: Text('18:00')),
+                      DropdownMenuItem(value: '20:00', child: Text('20:00')),
+                    ],
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => time = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: trainerName.isEmpty ? null : trainerName,
+                    dropdownColor: dialogContext.colors.panel2,
+                    style: TextStyle(color: dialogContext.colors.white),
+                    decoration: _inputDecoration(dialogContext, 'Entrenador'),
+                    items: trainers.map((t) {
+                      final value = t['name'].toString();
+                      return DropdownMenuItem(value: value, child: Text(value));
+                    }).toList(),
+                    onChanged: (v) {
+                      if (v != null) setDialogState(() => trainerName = v);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  _field(capacityCtrl, 'Cupo máximo',
+                      keyboard: TextInputType.number),
+                  const SizedBox(height: 24),
+                  _button(
+                    'GUARDAR CAMBIOS',
+                    dialogContext.colors.yellow,
+                    () async {
+                      if (name.text.trim().isEmpty) return;
+                      final navigator = Navigator.of(dialogContext);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      final ctx = dialogContext;
+
+                      setState(() {
+                        classItem['name'] = name.text.trim();
+                        classItem['type'] = type;
+                        classItem['day'] = day;
+                        classItem['time'] = time;
+                        classItem['trainer'] = trainerName;
+                        classItem['capacity'] =
+                            int.tryParse(capacityCtrl.text) ?? 20;
+                      });
+
+                      navigator.pop();
+                      await _saveLocalData();
+
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content:
+                              const Text('Clase actualizada correctamente'),
+                          backgroundColor: ctx.colors.green,
                         ),
                       );
                     },
@@ -3147,20 +5372,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void deleteClass(Map<String, dynamic> classItem) {
     showDialog(
       context: context,
-      builder: (_) {
+      builder: (dialogContext) {
         return _dialog(
           title: 'ELIMINAR CLASE',
-          accent: kRed,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.warning_amber_rounded, color: kRed, size: 60),
+              Icon(Icons.warning_amber_rounded,
+                  color: dialogContext.colors.red, size: 60),
               const SizedBox(height: 18),
               Text(
                 '¿Eliminar la clase "${classItem['name']}"?',
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: dialogContext.colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.w900,
                 ),
@@ -3170,20 +5396,19 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(dialogContext),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),
-                        side: const BorderSide(color: kBorder),
+                        side: BorderSide(color: dialogContext.colors.border),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(13),
                         ),
                       ),
-                      child: const Text(
+                      child: Text(
                         'CANCELAR',
                         style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                        ),
+                            color: dialogContext.colors.white,
+                            fontWeight: FontWeight.w900),
                       ),
                     ),
                   ),
@@ -3191,21 +5416,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   Expanded(
                     child: ElevatedButton(
                       onPressed: () async {
-                        final navigator = Navigator.of(context);
+                        final navigator = Navigator.of(dialogContext);
+                        final messenger = ScaffoldMessenger.of(dialogContext);
+                        final ctx = dialogContext;
                         setState(() => classes.remove(classItem));
                         navigator.pop();
                         await _saveLocalData();
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
+
+                        messenger.showSnackBar(
                           SnackBar(
                             content:
                                 Text('Clase "${classItem['name']}" eliminada'),
-                            backgroundColor: kGreen,
+                            backgroundColor: ctx.colors.green,
                           ),
                         );
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: kRed,
+                        backgroundColor: dialogContext.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 15),
                         shape: RoundedRectangleBorder(
@@ -3228,811 +5455,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // DETALLE CLIENTE
+  // DRAWER MÓVIL (ADMIN)
   // ═══════════════════════════════════════════════════════════
-
-  void showClientDetail(Map<String, dynamic> member) {
-    showDialog(
-      context: context,
-      builder: (_) {
-        return _dialog(
-          title: 'PERFIL DEL CLIENTE',
-          accent: kGreen,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [kRed, kPurple],
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      member['name'].toString().isEmpty
-                          ? '?'
-                          : member['name']
-                              .toString()
-                              .substring(0, 1)
-                              .toUpperCase(),
-                      style: const TextStyle(
-                        color: kWhite,
-                        fontSize: 30,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          member['name'].toString(),
-                          style: const TextStyle(
-                            color: kWhite,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          member['phone'].toString(),
-                          style: const TextStyle(
-                            color: kMuted,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        _statusChip(
-                          member['status'].toString(),
-                          member['status'] == 'ACTIVO'
-                              ? kGreen
-                              : member['status'] == 'POR VENCER'
-                                  ? kYellow
-                                  : kRed,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: _infoPanel(
-                      title: 'INFO',
-                      icon: Icons.info_outline_rounded,
-                      color: kPurple,
-                      rows: [
-                        ['Plan', member['plan'].toString()],
-                        ['Vence', member['expiry'].toString()],
-                        ['Desde', member['memberSince'].toString()],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _infoPanel(
-                      title: 'PAGOS',
-                      icon: Icons.payments_rounded,
-                      color: kYellow,
-                      rows: [
-                        ['Pagos', member['payments'].toString()],
-                        [
-                          'Total',
-                          formatPrice((member['totalPaid'] as num).toDouble())
-                        ],
-                        ['Último', member['lastVisit'].toString()],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: _infoPanel(
-                      title: 'ESTADÍSTICAS',
-                      icon: Icons.insights_rounded,
-                      color: kGreen,
-                      rows: [
-                        ['Asistencias', member['attendance'].toString()],
-                        ['Promedio', '4/semana'],
-                        ['Última visita', member['lastVisit'].toString()],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: kPanel2,
-                        borderRadius: BorderRadius.circular(13),
-                        border: Border.all(color: kBorder),
-                      ),
-                      child: Column(
-                        children: [
-                          const Row(
-                            children: [
-                              Icon(
-                                Icons.qr_code_rounded,
-                                color: kGreen,
-                                size: 16,
-                              ),
-                              SizedBox(width: 8),
-                              Text(
-                                'QR PERSONAL',
-                                style: TextStyle(
-                                  color: kMuted,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: QrImageView(
-                              data: member['qrCode'].toString(),
-                              size: 120,
-                              backgroundColor: Colors.white,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: kPanel2,
-                  borderRadius: BorderRadius.circular(13),
-                  border: Border.all(color: kBorder),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.receipt_long_rounded,
-                          color: kGreen,
-                          size: 16,
-                        ),
-                        SizedBox(width: 8),
-                        Text(
-                          'HISTORIAL DE PAGOS',
-                          style: TextStyle(
-                            color: kMuted,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    ...transactions
-                        .where((t) => t['name'] == member['name'])
-                        .take(5)
-                        .map((t) => _paymentRow(
-                              t['date'].toString(),
-                              t['method'].toString(),
-                              (t['amount'] as num).toDouble(),
-                            )),
-                    if (transactions
-                        .where((t) => t['name'] == member['name'])
-                        .isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8),
-                        child: Text(
-                          'Sin pagos registrados',
-                          style: TextStyle(color: kMuted, fontSize: 12),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        editMember(member);
-                      },
-                      icon: const Icon(
-                        Icons.edit_rounded,
-                        color: kYellow,
-                        size: 18,
-                      ),
-                      label: const Text(
-                        'EDITAR',
-                        style: TextStyle(
-                          color: kWhite,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11,
-                        ),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        side: const BorderSide(color: kBorder),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(13),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Notificando a ${member['name']} por WhatsApp...',
-                            ),
-                          ),
-                        );
-                      },
-                      icon: const FaIcon(
-                        FontAwesomeIcons.whatsapp,
-                        size: 18,
-                      ),
-                      label: const Text(
-                        'WHATSAPP',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11,
-                        ),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: kGreen,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(13),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _infoPanel({
-    required String title,
-    required IconData icon,
-    required Color color,
-    required List<List<String>> rows,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: kPanel2,
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(color: kBorder),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, color: color, size: 16),
-              const SizedBox(width: 8),
-              Text(
-                title,
-                style: const TextStyle(
-                  color: kMuted,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          ...rows.map((r) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        r[0],
-                        style: const TextStyle(
-                          color: kMuted,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
-                    Text(
-                      r[1],
-                      style: const TextStyle(
-                        color: kWhite,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              )),
-        ],
-      ),
-    );
-  }
-
-  Widget _paymentRow(String date, String method, double amount) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: const BoxDecoration(
-              color: kGreen,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              date,
-              style: const TextStyle(
-                color: kWhite,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          Text(
-            method,
-            style: const TextStyle(
-              color: kMuted,
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(
-            '\$${amount.toStringAsFixed(2)}',
-            style: const TextStyle(
-              color: kGreen,
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void showNotifications() {
-    showDialog(
-      context: context,
-      builder: (_) {
-        return _dialog(
-          title: 'NOTIFICACIONES',
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _notification(
-                'Membresía por vencer',
-                'Revisa los clientes con estado POR VENCER.',
-                kYellow,
-              ),
-              _notification(
-                'Membresía vencida',
-                'Revisa los clientes con estado VENCIDO.',
-                kRed,
-              ),
-              _notification(
-                'Aforo',
-                'Actualmente hay $inside personas dentro.',
-                kPurple,
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void showActivity() {
-    showDialog(
-      context: context,
-      builder: (_) {
-        return _dialog(
-          title: 'ACTIVIDAD RECIENTE',
-          child: SizedBox(
-            width: 560,
-            child: ListView(
-              shrinkWrap: true,
-              children: activities.isEmpty
-                  ? [
-                      const Padding(
-                        padding: EdgeInsets.all(30),
-                        child: Center(
-                          child: Text(
-                            'Sin actividad reciente',
-                            style: TextStyle(color: kMuted),
-                          ),
-                        ),
-                      ),
-                    ]
-                  : activities.map((a) {
-                      return ListTile(
-                        leading: const Icon(
-                          Icons.bolt_rounded,
-                          color: kYellow,
-                        ),
-                        title: Text(
-                          a['name'] ?? '',
-                          style: const TextStyle(color: kWhite),
-                        ),
-                        subtitle: Text(
-                          a['type'] ?? '',
-                          style: const TextStyle(color: kMuted),
-                        ),
-                        trailing: Text(
-                          a['time'] ?? '',
-                          style: const TextStyle(color: kMuted),
-                        ),
-                      );
-                    }).toList(),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void showAccessScanner() {
-    bool done = false;
-
-    showDialog(
-      context: context,
-      builder: (_) {
-        return Dialog(
-          backgroundColor: kPanel,
-          child: SizedBox(
-            width: 480,
-            height: 620,
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'ESCANEAR ACCESO',
-                          style: TextStyle(
-                            color: kWhite,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 1.2,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(
-                          Icons.close,
-                          color: kWhite,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(20),
-                    child: MobileScanner(
-                      onDetect: (capture) {
-                        if (done || capture.barcodes.isEmpty) {
-                          return;
-                        }
-
-                        final raw = capture.barcodes.first.rawValue;
-
-                        if (raw == null || raw.isEmpty) {
-                          return;
-                        }
-
-                        done = true;
-
-                        Navigator.pop(context);
-
-                        processAccess(raw);
-                      },
-                    ),
-                  ),
-                ),
-                const Padding(
-                  padding: EdgeInsets.all(18),
-                  child: Text(
-                    'Apunta la cámara al código QR de acceso.',
-                    style: TextStyle(
-                      color: kMuted,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> processAccess(String code) async {
-    const receptionCode = 'SYNTHETIX-GYM-RECEPTION-01';
-
-    if (code == receptionCode) {
-      if (members.isEmpty) {
-        showAccessResult(
-          authorized: false,
-          reason: 'No hay miembros registrados.',
-        );
-        return;
-      }
-
-      final member = members.first;
-
-      if (member['status'] == 'VENCIDO') {
-        await _registerCheckin(member, false, 'Membresía vencida');
-        showAccessResult(
-          authorized: false,
-          member: member,
-          reason: 'La membresía está vencida.',
-        );
-        return;
-      }
-
-      await _registerCheckin(member, true, null);
-
-      showAccessResult(
-        authorized: true,
-        member: member,
-      );
-      return;
-    }
-
-    final match = members.firstWhere(
-      (m) => m['qrCode'] == code,
-      orElse: () => <String, dynamic>{},
-    );
-
-    if (match.isEmpty) {
-      showAccessResult(
-        authorized: false,
-        reason: 'Código QR no reconocido.',
-      );
-      return;
-    }
-
-    if (match['status'] == 'VENCIDO') {
-      await _registerCheckin(match, false, 'Membresía vencida');
-      showAccessResult(
-        authorized: false,
-        member: match,
-        reason: 'La membresía está vencida.',
-      );
-      return;
-    }
-
-    await _registerCheckin(match, true, null);
-
-    showAccessResult(
-      authorized: true,
-      member: match,
-    );
-  }
-
-  Future<void> _registerCheckin(
-    Map<String, dynamic> member,
-    bool authorized,
-    String? reason,
-  ) async {
-    if (authorized) {
-      setState(() {
-        inside++;
-        loadingCheckins = false;
-      });
-    }
-
-    await _saveLocalData();
-
-    addActivity(
-      authorized ? 'ENTRADA' : 'BLOQUEADO',
-      member['name'].toString(),
-    );
-
-    final memberId = member['id'];
-    if (memberId == null || memberId.toString().startsWith('local-')) {
-      return;
-    }
-
-    try {
-      final supabase = Supabase.instance.client;
-
-      await supabase.from('checkins').insert({
-        'member_id': memberId,
-        'type': 'ENTRADA',
-        'authorized': authorized,
-        'reason': reason,
-      });
-
-      if (authorized) {
-        final currentAttendance = (member['attendance'] as num?)?.toInt() ?? 0;
-
-        await supabase.from('members').update({
-          'attendance': currentAttendance + 1,
-          'last_visit': _formatDate(DateTime.now()),
-        }).eq('id', memberId);
-
-        for (var m in members) {
-          if (m['id'] == memberId) {
-            m['attendance'] = currentAttendance + 1;
-            m['lastVisit'] = _formatDate(DateTime.now());
-            break;
-          }
-        }
-      }
-
-      await supabase.from('activities').insert({
-        'type': authorized ? 'ENTRADA' : 'BLOQUEADO',
-        'name': member['name'].toString(),
-      });
-
-      await loadMembers();
-      await loadActivities();
-      await loadCheckins();
-      await _saveLocalData();
-    } catch (e) {
-      debugPrint('⚠️ Checkin solo local: $e');
-    }
-  }
-
-  void showAccessResult({
-    required bool authorized,
-    Map<String, dynamic>? member,
-    String? reason,
-  }) {
-    showDialog(
-      context: context,
-      builder: (_) {
-        return _dialog(
-          title: authorized ? 'ACCESO AUTORIZADO' : 'ACCESO BLOQUEADO',
-          accent: authorized ? kGreen : kRed,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                authorized ? Icons.check_circle_rounded : Icons.block_rounded,
-                size: 72,
-                color: authorized ? kGreen : kRed,
-              ),
-              const SizedBox(height: 20),
-              if (member != null) ...[
-                Text(
-                  member['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'PLAN ${member['plan']}',
-                  style: const TextStyle(
-                    color: kMuted,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'VENCE ${member['expiry']}',
-                  style: const TextStyle(
-                    color: kMuted,
-                  ),
-                ),
-              ],
-              if (reason != null) ...[
-                const SizedBox(height: 18),
-                Text(
-                  reason,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 16,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 24),
-              _button(
-                authorized ? 'CONTINUAR' : 'CERRAR',
-                authorized ? kGreen : kRed,
-                () => Navigator.pop(context),
-                darkText: authorized,
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void registerExit() {
-    if (inside <= 0) return;
-
-    setState(() {
-      inside--;
-    });
-
-    addActivity('SALIDA', 'Acceso registrado');
-    _saveLocalData();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Salida registrada correctamente'),
-      ),
-    );
-  }
-  // ═══════════════════════════════════════════════════════════
-  // BUILD + LAYOUT
-  // ═══════════════════════════════════════════════════════════
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      key: _scaffoldKey,
-      backgroundColor: kBg,
-      drawer: _mobileDrawer(),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth < 850) {
-            return _mobile();
-          }
-          return _desktop();
-        },
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // DRAWER (SIDEBAR MÓVIL DESLIZABLE)
-  // ═══════════════════════════════════════════════════════════
-
   Widget _mobileDrawer() {
     final items = [
       [Icons.grid_view_rounded, 'Command Center'],
@@ -4041,17 +5465,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       [Icons.card_membership_rounded, 'Membresías'],
       [Icons.payments_rounded, 'Finanzas'],
       [Icons.fitness_center_rounded, 'Entrenamiento'],
-      [Icons.analytics_rounded, 'Analytics'],
       [Icons.notifications_active_rounded, 'Alertas'],
       [Icons.currency_exchange_rounded, 'Monedas'],
     ];
 
     return Drawer(
-      backgroundColor: const Color(0xFF010101),
+      backgroundColor: context.colors.panel,
       child: SafeArea(
         child: Column(
           children: [
-            // Header del drawer
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
               child: Row(
@@ -4060,11 +5482,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     width: 46,
                     height: 46,
                     decoration: BoxDecoration(
-                      color: kRed,
+                      color: context.colors.red,
                       borderRadius: BorderRadius.circular(13),
                       boxShadow: [
                         BoxShadow(
-                          color: kRed.withOpacity(.35),
+                          color: context.colors.red.withValues(alpha: .35),
                           blurRadius: 22,
                         ),
                       ],
@@ -4076,24 +5498,24 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     ),
                   ),
                   const SizedBox(width: 12),
-                  const Expanded(
+                  Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           'SYNTHETIX',
                           style: TextStyle(
-                            color: kWhite,
+                            color: context.colors.white,
                             fontSize: 16,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 1.4,
                           ),
                         ),
-                        SizedBox(height: 2),
+                        const SizedBox(height: 2),
                         Text(
                           'GYM OS PRO',
                           style: TextStyle(
-                            color: kMuted,
+                            color: context.colors.muted,
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 1,
@@ -4104,23 +5526,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   ),
                   IconButton(
                     onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.close_rounded,
-                      color: kMuted,
+                      color: context.colors.muted,
                     ),
                   ),
                 ],
               ),
             ),
-            const Divider(color: kBorder, height: 1),
+            Divider(color: context.colors.border, height: 1),
             const SizedBox(height: 12),
-
-            // Lista de items
             Expanded(
               child: ListView.builder(
                 itemCount: items.length,
                 itemBuilder: (context, index) {
                   final selected = index == _section;
+                  final isAlerts = index == 6;
+                  final ac = alertCount(context);
 
                   return Padding(
                     padding: const EdgeInsets.symmetric(
@@ -4130,9 +5552,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     child: InkWell(
                       borderRadius: BorderRadius.circular(14),
                       onTap: () {
-                        setState(() {
-                          _section = index;
-                        });
+                        setState(() => _section = index);
                         Navigator.pop(context);
                       },
                       child: AnimatedContainer(
@@ -4143,12 +5563,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         ),
                         decoration: BoxDecoration(
                           color: selected
-                              ? kRed.withOpacity(.13)
+                              ? context.colors.red.withValues(alpha: .13)
                               : Colors.transparent,
                           borderRadius: BorderRadius.circular(14),
                           border: Border.all(
                             color: selected
-                                ? kRed.withOpacity(.45)
+                                ? context.colors.red.withValues(alpha: .45)
                                 : Colors.transparent,
                           ),
                         ),
@@ -4156,7 +5576,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           children: [
                             Icon(
                               items[index][0] as IconData,
-                              color: selected ? kRed : kMuted,
+                              color: selected
+                                  ? context.colors.red
+                                  : context.colors.muted,
                               size: 22,
                             ),
                             const SizedBox(width: 14),
@@ -4164,7 +5586,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               child: Text(
                                 items[index][1] as String,
                                 style: TextStyle(
-                                  color: selected ? kWhite : kMuted,
+                                  color: selected
+                                      ? context.colors.white
+                                      : context.colors.muted,
                                   fontSize: 14,
                                   fontWeight: selected
                                       ? FontWeight.w800
@@ -4172,12 +5596,32 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 ),
                               ),
                             ),
+                            if (isAlerts && ac > 0)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: context.colors.red,
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  '$ac',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
                             if (selected)
                               Container(
+                                margin: const EdgeInsets.only(left: 6),
                                 width: 8,
                                 height: 8,
-                                decoration: const BoxDecoration(
-                                  color: kRed,
+                                decoration: BoxDecoration(
+                                  color: context.colors.red,
                                   shape: BoxShape.circle,
                                 ),
                               ),
@@ -4189,39 +5633,73 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 },
               ),
             ),
-
-            // Footer
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () {
+                  Navigator.pop(context);
+                  confirmLogout();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 15,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.colors.red.withValues(alpha: .10),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: context.colors.red.withValues(alpha: .30),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.logout_rounded,
+                          color: context.colors.red, size: 22),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(
+                          'CERRAR SESIÓN',
+                          style: TextStyle(
+                            color: context.colors.red,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: kPanel,
+                  color: context.colors.panel2,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: kBorder),
+                  border: Border.all(color: context.colors.border),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
-                    Icon(
-                      Icons.shield_rounded,
-                      color: kGreen,
-                      size: 20,
-                    ),
-                    SizedBox(width: 10),
+                    Icon(Icons.shield_rounded,
+                        color: context.colors.green, size: 20),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         'SISTEMA OPERATIVO',
                         style: TextStyle(
-                          color: kMuted,
+                          color: context.colors.muted,
                           fontSize: 11,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
                     ),
                     CircleAvatar(
-                      radius: 4,
-                      backgroundColor: kGreen,
-                    ),
+                        radius: 4, backgroundColor: context.colors.green),
                   ],
                 ),
               ),
@@ -4235,27 +5713,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   // ═══════════════════════════════════════════════════════════
   // DESKTOP
   // ═══════════════════════════════════════════════════════════
-
   Widget _desktop() {
     return Row(
       children: [
         _sidebar(),
         Expanded(
-          child: Stack(
+          child: Column(
             children: [
-              Column(
-                children: [
-                  _header(),
-                  Expanded(
-                    child: loadingData
-                        ? const Center(
-                            child: CircularProgressIndicator(
-                              color: kGreen,
-                            ),
-                          )
-                        : _content(),
-                  ),
-                ],
+              _header(),
+              Expanded(
+                child: loadingData
+                    ? Center(
+                        child: CircularProgressIndicator(
+                          color: context.colors.green,
+                        ),
+                      )
+                    : _content(),
               ),
             ],
           ),
@@ -4272,14 +5745,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       [Icons.card_membership_rounded, 'Membresías'],
       [Icons.payments_rounded, 'Finanzas'],
       [Icons.fitness_center_rounded, 'Entrenamiento'],
-      [Icons.analytics_rounded, 'Analytics'],
       [Icons.notifications_active_rounded, 'Alertas'],
       [Icons.currency_exchange_rounded, 'Monedas'],
     ];
 
     return Container(
       width: 260,
-      color: const Color(0xFF010101),
+      color: context.colors.panel,
       padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
       child: Column(
         children: [
@@ -4289,11 +5761,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 width: 44,
                 height: 44,
                 decoration: BoxDecoration(
-                  color: kRed,
+                  color: context.colors.red,
                   borderRadius: BorderRadius.circular(13),
                   boxShadow: [
                     BoxShadow(
-                      color: kRed.withOpacity(.35),
+                      color: context.colors.red.withValues(alpha: .35),
                       blurRadius: 22,
                     ),
                   ],
@@ -4305,11 +5777,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 ),
               ),
               const SizedBox(width: 12),
-              const Expanded(
+              Expanded(
                 child: Text(
                   'SYNTHETIX\nGYM OS PRO',
                   style: TextStyle(
-                    color: kWhite,
+                    color: context.colors.white,
                     fontSize: 15,
                     height: 1.05,
                     fontWeight: FontWeight.w900,
@@ -4325,16 +5797,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               itemCount: items.length,
               itemBuilder: (context, index) {
                 final selected = index == _section;
+                final isAlerts = index == 6;
+                final ac = alertCount(context);
 
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(14),
-                    onTap: () {
-                      setState(() {
-                        _section = index;
-                      });
-                    },
+                    onTap: () => setState(() => _section = index),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       padding: const EdgeInsets.symmetric(
@@ -4343,12 +5813,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       ),
                       decoration: BoxDecoration(
                         color: selected
-                            ? kRed.withOpacity(.13)
+                            ? context.colors.red.withValues(alpha: .13)
                             : Colors.transparent,
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(
                           color: selected
-                              ? kRed.withOpacity(.45)
+                              ? context.colors.red.withValues(alpha: .45)
                               : Colors.transparent,
                         ),
                       ),
@@ -4356,7 +5826,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         children: [
                           Icon(
                             items[index][0] as IconData,
-                            color: selected ? kRed : kMuted,
+                            color: selected
+                                ? context.colors.red
+                                : context.colors.muted,
                             size: 21,
                           ),
                           const SizedBox(width: 13),
@@ -4364,13 +5836,34 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             child: Text(
                               items[index][1] as String,
                               style: TextStyle(
-                                color: selected ? kWhite : kMuted,
+                                color: selected
+                                    ? context.colors.white
+                                    : context.colors.muted,
                                 fontWeight: selected
                                     ? FontWeight.w800
                                     : FontWeight.w600,
                               ),
                             ),
                           ),
+                          if (isAlerts && ac > 0)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 7,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: context.colors.red,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                '$ac',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -4379,35 +5872,62 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               },
             ),
           ),
+          InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: confirmLogout,
+            child: Container(
+              padding: const EdgeInsets.all(14),
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(
+                color: context.colors.red.withValues(alpha: .10),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: context.colors.red.withValues(alpha: .30),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.logout_rounded,
+                      color: context.colors.red, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'CERRAR SESIÓN',
+                      style: TextStyle(
+                        color: context.colors.red,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: kPanel,
+              color: context.colors.panel2,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: kBorder),
+              border: Border.all(color: context.colors.border),
             ),
-            child: const Row(
+            child: Row(
               children: [
-                Icon(
-                  Icons.shield_rounded,
-                  color: kGreen,
-                  size: 20,
-                ),
-                SizedBox(width: 10),
+                Icon(Icons.shield_rounded,
+                    color: context.colors.green, size: 20),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     'SISTEMA OPERATIVO',
                     style: TextStyle(
-                      color: kMuted,
+                      color: context.colors.muted,
                       fontSize: 11,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
                 ),
-                CircleAvatar(
-                  radius: 4,
-                  backgroundColor: kGreen,
-                ),
+                CircleAvatar(radius: 4, backgroundColor: context.colors.green),
               ],
             ),
           ),
@@ -4417,18 +5937,18 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _header() {
+    final ac = alertCount(context);
+
     return Container(
       height: 78,
       padding: const EdgeInsets.symmetric(horizontal: 28),
-      decoration: const BoxDecoration(
-        color: kBg,
-        border: Border(
-          bottom: BorderSide(color: kBorder),
-        ),
+      decoration: BoxDecoration(
+        color: context.colors.bg,
+        border: Border(bottom: BorderSide(color: context.colors.border)),
       ),
       child: Row(
         children: [
-          const Expanded(
+          Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -4436,61 +5956,64 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 Text(
                   'COMMAND CENTER',
                   style: TextStyle(
-                    color: kWhite,
+                    color: context.colors.white,
                     fontSize: 19,
                     fontWeight: FontWeight.w900,
                     letterSpacing: 1.4,
                   ),
                 ),
-                SizedBox(height: 3),
+                const SizedBox(height: 3),
                 Text(
                   'Control operativo del gimnasio',
-                  style: TextStyle(
-                    color: kMuted,
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: context.colors.muted, fontSize: 12),
                 ),
               ],
             ),
           ),
           IconButton(
-            onPressed: () => loadAllData(),
-            icon: const Icon(
-              Icons.refresh_rounded,
-              color: kGreen,
+            onPressed: () => themeController.toggle(),
+            icon: Icon(
+              themeController.isDark
+                  ? Icons.light_mode_rounded
+                  : Icons.dark_mode_rounded,
+              color: context.colors.yellow,
             ),
+            tooltip: themeController.isDark
+                ? 'Cambiar a modo claro'
+                : 'Cambiar a modo oscuro',
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            onPressed: () => loadAllData(),
+            icon: Icon(Icons.refresh_rounded, color: context.colors.green),
             tooltip: 'Recargar datos',
           ),
           const SizedBox(width: 4),
           InkWell(
             borderRadius: BorderRadius.circular(13),
-            onTap: () {
-              setState(() {
-                _section = 8;
-              });
-            },
+            onTap: () => setState(() => _section = 7),
             child: Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: 12,
                 vertical: 9,
               ),
               decoration: BoxDecoration(
-                color: kPanel,
+                color: context.colors.panel,
                 borderRadius: BorderRadius.circular(13),
-                border: Border.all(color: kBorder),
+                border: Border.all(color: context.colors.border),
               ),
               child: Row(
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.currency_exchange_rounded,
-                    color: kGreen,
+                    color: context.colors.green,
                     size: 18,
                   ),
                   const SizedBox(width: 8),
                   Text(
                     selectedCurrency,
-                    style: const TextStyle(
-                      color: kWhite,
+                    style: TextStyle(
+                      color: context.colors.white,
                       fontWeight: FontWeight.w900,
                       fontSize: 12,
                     ),
@@ -4500,12 +6023,41 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ),
           ),
           const SizedBox(width: 8),
-          IconButton(
-            onPressed: showNotifications,
-            icon: const Icon(
-              Icons.notifications_none_rounded,
-              color: kWhite,
-            ),
+          Stack(
+            children: [
+              IconButton(
+                onPressed: showNotifications,
+                icon: Icon(
+                  Icons.notifications_none_rounded,
+                  color: context.colors.white,
+                ),
+              ),
+              if (ac > 0)
+                Positioned(
+                  right: 8,
+                  top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    constraints: const BoxConstraints(
+                      minWidth: 16,
+                      minHeight: 16,
+                    ),
+                    decoration: BoxDecoration(
+                      color: context.colors.red,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      '$ac',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(width: 8),
           Container(
@@ -4513,16 +6065,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(
-                color: kPurple,
-                width: 2,
-              ),
+              border: Border.all(color: context.colors.purple, width: 2),
             ),
-            child: const Center(
+            child: Center(
               child: Text(
                 'A',
                 style: TextStyle(
-                  color: kWhite,
+                  color: context.colors.white,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -4539,15 +6088,270 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     if (_section == 3) return _plansPage();
     if (_section == 4) return _financePage();
     if (_section == 5) return _trainingPage();
-    if (_section == 8) return _currencyPage();
-    if (_section != 0) return _modulePage();
+    if (_section == 6) return _alertsPage();
+    if (_section == 7) return _currencyPage();
     return _dashboardContent();
   }
 
   // ═══════════════════════════════════════════════════════════
-  // DASHBOARD
+  // NOTIFICACIONES
   // ═══════════════════════════════════════════════════════════
+  void showNotifications() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, setModalState) {
+            final alerts = activeAlerts(sheetContext);
 
+            return Container(
+              margin: EdgeInsets.only(
+                top: MediaQuery.of(sheetContext).padding.top + 40,
+              ),
+              decoration: BoxDecoration(
+                color: sheetContext.colors.bg,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(28)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(top: 12),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: sheetContext.colors.muted.withValues(alpha: .4),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color:
+                                sheetContext.colors.red.withValues(alpha: .12),
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                          child: Icon(
+                            Icons.notifications_active_rounded,
+                            color: sheetContext.colors.red,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Notificaciones',
+                                style: TextStyle(
+                                  color: sheetContext.colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                alerts.isEmpty
+                                    ? 'Todo en orden'
+                                    : '${alerts.length} ${alerts.length == 1 ? "pendiente" : "pendientes"}',
+                                style: TextStyle(
+                                  color: sheetContext.colors.muted,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(sheetContext),
+                          icon: Icon(
+                            Icons.close_rounded,
+                            color: sheetContext.colors.muted,
+                            size: 22,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Flexible(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight:
+                            MediaQuery.of(sheetContext).size.height * 0.6,
+                      ),
+                      child: alerts.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.all(40),
+                              child: Center(
+                                child: Column(
+                                  children: [
+                                    Icon(
+                                      Icons.check_circle_rounded,
+                                      color: sheetContext.colors.green,
+                                      size: 50,
+                                    ),
+                                    const SizedBox(height: 14),
+                                    Text(
+                                      'Sin notificaciones',
+                                      style: TextStyle(
+                                        color: sheetContext.colors.white,
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      'Todo está al día',
+                                      style: TextStyle(
+                                        color: sheetContext.colors.muted,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                              itemCount: alerts.length,
+                              itemBuilder: (_, i) {
+                                final alert = alerts[i];
+                                final color = alert['color'] as Color;
+                                final icon = alert['icon'] as IconData;
+
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 10),
+                                  padding: const EdgeInsets.all(14),
+                                  decoration: BoxDecoration(
+                                    color: sheetContext.colors.panel,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: color.withValues(alpha: .25),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        width: 42,
+                                        height: 42,
+                                        decoration: BoxDecoration(
+                                          color: color.withValues(alpha: .12),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Icon(
+                                          icon,
+                                          color: color,
+                                          size: 20,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              alert['title'].toString(),
+                                              style: TextStyle(
+                                                color:
+                                                    sheetContext.colors.white,
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w800,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              alert['subtitle'].toString(),
+                                              style: TextStyle(
+                                                color:
+                                                    sheetContext.colors.muted,
+                                                fontSize: 11,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      IconButton(
+                                        onPressed: () {
+                                          dismissAlert(alert['id'].toString());
+                                          setModalState(() {});
+                                        },
+                                        icon: Icon(
+                                          Icons.close_rounded,
+                                          color: sheetContext.colors.muted,
+                                          size: 18,
+                                        ),
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 32,
+                                          minHeight: 32,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ),
+                  if (alerts.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.pop(sheetContext);
+                            setState(() => _section = 6);
+                          },
+                          icon: const Icon(Icons.list_rounded, size: 18),
+                          label: const Text(
+                            'VER TODAS LAS ALERTAS',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w900,
+                              fontSize: 12,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: sheetContext.colors.red,
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // DASHBOARD DESKTOP
+  // ═══════════════════════════════════════════════════════════
   Widget _dashboardContent() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -4562,7 +6366,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: _quickAction(
                   Icons.person_add_alt_1_rounded,
                   'AGREGAR MIEMBRO',
-                  kRed,
+                  context.colors.red,
                   addMember,
                 ),
               ),
@@ -4571,7 +6375,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: _quickAction(
                   Icons.payments_rounded,
                   'NUEVO PAGO',
-                  kYellow,
+                  context.colors.yellow,
                   newPayment,
                   darkText: true,
                 ),
@@ -4581,7 +6385,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: _quickAction(
                   Icons.qr_code_scanner_rounded,
                   'ESCANEAR ACCESO',
-                  kPurple,
+                  context.colors.purple,
                   showAccessScanner,
                 ),
               ),
@@ -4593,15 +6397,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                flex: 3,
-                child: _activityCard(),
-              ),
+              Expanded(flex: 3, child: _activityCard()),
               const SizedBox(width: 18),
-              Expanded(
-                flex: 2,
-                child: _plansCard(),
-              ),
+              Expanded(flex: 2, child: _plansCard()),
             ],
           ),
           const SizedBox(height: 24),
@@ -4611,40 +6409,482 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // TRAINING PAGE
-  // ═══════════════════════════════════════════════════════════
+  Widget _hero() {
+    final percent = (occupancy * 100).round();
 
+    return Container(
+      padding: const EdgeInsets.all(28),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: context.colors.border),
+        boxShadow: [
+          BoxShadow(
+            color: context.colors.red.withValues(alpha: .08),
+            blurRadius: 35,
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'CONTROL EN TIEMPO REAL',
+                  style: TextStyle(
+                    color: context.colors.red,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 2,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'AFORO DEL GIMNASIO',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 31,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '$inside personas dentro · ${capacity - inside} espacios disponibles',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    _statusChip('$percent% OCUPADO', context.colors.red),
+                    const SizedBox(width: 10),
+                    _statusChip('OPERATIVO', context.colors.green),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            width: 190,
+            height: 190,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                TweenAnimationBuilder<double>(
+                  duration: const Duration(milliseconds: 1400),
+                  curve: Curves.easeOutCubic,
+                  tween: Tween(begin: 0.0, end: occupancy),
+                  builder: (context, value, _) {
+                    return CustomPaint(
+                      size: const Size(190, 190),
+                      painter: _OccupancyPainter(
+                        percentage: value,
+                        trackColor: context.colors.border,
+                        progressColors: [
+                          context.colors.red,
+                          context.colors.purple,
+                          context.colors.green,
+                        ],
+                      ),
+                    );
+                  },
+                ),
+                if (loadingCheckins)
+                  SizedBox(
+                    width: 80,
+                    height: 80,
+                    child: CircularProgressIndicator(
+                      color: context.colors.green,
+                      strokeWidth: 3,
+                    ),
+                  )
+                else
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        '$inside',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 43,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      Text(
+                        'DENTRO',
+                        style: TextStyle(
+                          color: context.colors.muted,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _metrics() {
+    return GridView.count(
+      crossAxisCount: 4,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      crossAxisSpacing: 14,
+      mainAxisSpacing: 14,
+      childAspectRatio: 0.95,
+      children: [
+        _metric(
+          'INGRESOS',
+          formatPrice(income),
+          Icons.payments_rounded,
+          context.colors.yellow,
+          trend: '+14.2%',
+          subtitle: 'este mes',
+          chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0],
+        ),
+        _metric(
+          'MIEMBROS ACTIVOS',
+          activeMembers.toString(),
+          Icons.people_alt_rounded,
+          context.colors.purple,
+          trend: '+8.4%',
+          subtitle: 'vs mes anterior',
+          chartData: const [0.5, 0.55, 0.6, 0.58, 0.7, 0.75, 0.85, 1.0],
+        ),
+        _metric(
+          'POR VENCER',
+          members.where((m) => m['status'] == 'POR VENCER').length.toString(),
+          Icons.warning_amber_rounded,
+          context.colors.yellow,
+          trend: '7 días',
+          subtitle: 'requieren atención',
+          chartData: const [0.3, 0.4, 0.35, 0.5, 0.45, 0.55, 0.5, 0.6],
+        ),
+        _metric(
+          'VENCIDOS',
+          members.where((m) => m['status'] == 'VENCIDO').length.toString(),
+          Icons.block_rounded,
+          context.colors.red,
+          trend: '-3.1%',
+          subtitle: 'vs mes anterior',
+          chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5],
+        ),
+      ],
+    );
+  }
+
+  Widget _activityCard() {
+    return _card(
+      title: 'ACTIVIDAD RECIENTE',
+      action: 'VER TODO',
+      onAction: showActivity,
+      child: activities.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: Text(
+                  'Sin actividad reciente',
+                  style: TextStyle(color: context.colors.muted),
+                ),
+              ),
+            )
+          : Column(
+              children: activities.take(5).map((a) {
+                Color color = context.colors.purple;
+                if (a['type'] == 'ENTRADA') color = context.colors.green;
+                if (a['type'] == 'PAGO') color = context.colors.yellow;
+
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: .10),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(Icons.bolt_rounded, color: color),
+                  ),
+                  title: Text(
+                    a['name'] ?? '',
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  subtitle: Text(
+                    a['type'] ?? '',
+                    style: TextStyle(color: context.colors.muted, fontSize: 11),
+                  ),
+                  trailing: Text(
+                    a['time'] ?? '',
+                    style: TextStyle(color: context.colors.muted, fontSize: 11),
+                  ),
+                );
+              }).toList(),
+            ),
+    );
+  }
+
+  Widget _plansCard() {
+    return _card(
+      title: 'PLANES',
+      action: 'NUEVO',
+      onAction: addPlan,
+      child: plans.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: Text(
+                  'Sin planes registrados',
+                  style: TextStyle(color: context.colors.muted),
+                ),
+              ),
+            )
+          : Column(
+              children: plans.take(4).map((p) {
+                final price = (p['price'] as num).toDouble();
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(13),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel2,
+                    borderRadius: BorderRadius.circular(13),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 55,
+                        decoration: BoxDecoration(
+                          color: context.colors.purple,
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              p['name'].toString(),
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '${p['days']} días · ${p['access']}',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            formatPrice(price),
+                            style: TextStyle(
+                              color: context.colors.yellow,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 15,
+                            ),
+                          ),
+                          if (showConversion)
+                            Text(
+                              formatPriceSecondary(price),
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+    );
+  }
+
+  Widget _membersCard() {
+    final query = searchController.text.toLowerCase();
+
+    final filtered = members.where((m) {
+      return m['name'].toString().toLowerCase().contains(query);
+    }).toList();
+
+    return _card(
+      title: 'MIEMBROS',
+      action: 'AGREGAR',
+      onAction: addMember,
+      child: Column(
+        children: [
+          TextField(
+            controller: searchController,
+            onChanged: (_) => setState(() {}),
+            style: TextStyle(color: context.colors.white),
+            decoration: _inputDecoration(
+              context,
+              'Buscar miembro',
+              prefixIcon: Icons.search_rounded,
+            ),
+          ),
+          const SizedBox(height: 14),
+          if (filtered.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: Text(
+                  'Sin miembros registrados',
+                  style: TextStyle(color: context.colors.muted),
+                ),
+              ),
+            )
+          else
+            ...filtered.map((m) {
+              final status = m['status'].toString();
+              Color color = context.colors.green;
+              if (status == 'POR VENCER') color = context.colors.yellow;
+              if (status == 'VENCIDO') color = context.colors.red;
+              if (status == 'PENDIENTE') color = context.colors.purple;
+
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                onTap: () => showClientDetail(m),
+                leading: CircleAvatar(
+                  backgroundColor: color.withValues(alpha: .15),
+                  child: Text(
+                    m['name'].toString().isEmpty
+                        ? '?'
+                        : m['name'].toString().substring(0, 1).toUpperCase(),
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                title: Text(
+                  m['name'].toString(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                subtitle: Text(
+                  '${m['plan']} · vence ${m['expiry']}',
+                  style: TextStyle(color: context.colors.muted, fontSize: 12),
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _statusChip(status, color),
+                    const SizedBox(width: 4),
+                    PopupMenuButton<String>(
+                      icon: Icon(
+                        Icons.more_vert_rounded,
+                        color: context.colors.muted,
+                        size: 20,
+                      ),
+                      color: context.colors.panel2,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        side: BorderSide(color: context.colors.border),
+                      ),
+                      onSelected: (value) {
+                        if (value == 'edit') editMember(m);
+                        if (value == 'delete') deleteMember(m);
+                      },
+                      itemBuilder: (context) => [
+                        PopupMenuItem<String>(
+                          value: 'edit',
+                          child: Row(
+                            children: [
+                              Icon(Icons.edit_rounded,
+                                  color: context.colors.yellow, size: 18),
+                              const SizedBox(width: 10),
+                              Text('Editar',
+                                  style:
+                                      TextStyle(color: context.colors.white)),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<String>(
+                          value: 'delete',
+                          child: Row(
+                            children: [
+                              Icon(Icons.delete_rounded,
+                                  color: context.colors.red, size: 18),
+                              const SizedBox(width: 10),
+                              Text('Eliminar',
+                                  style:
+                                      TextStyle(color: context.colors.white)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // TRAINING PAGE (DESKTOP)
+  // ═══════════════════════════════════════════════════════════
   Widget _trainingPage() {
-    final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'HORARIO'];
+    final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'TIPOS', 'HORARIO'];
 
     return Column(
       children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-          decoration: const BoxDecoration(
-            color: kBg,
-            border: Border(bottom: BorderSide(color: kBorder)),
+          decoration: BoxDecoration(
+            color: context.colors.bg,
+            border: Border(bottom: BorderSide(color: context.colors.border)),
           ),
           child: Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       'ENTRENAMIENTO',
                       style: TextStyle(
-                        color: kWhite,
+                        color: context.colors.white,
                         fontSize: 22,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 1.2,
                       ),
                     ),
-                    SizedBox(height: 4),
+                    const SizedBox(height: 4),
                     Text(
-                      'Rutinas · Ejercicios · Entrenadores · Horario',
-                      style: TextStyle(color: kMuted, fontSize: 12),
+                      'Rutinas · Ejercicios · Entrenadores · Tipos · Horario',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 12),
                     ),
                   ],
                 ),
@@ -4665,17 +6905,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             vertical: 12,
                           ),
                           decoration: BoxDecoration(
-                            color: active ? kPurple.withOpacity(.15) : kPanel,
+                            color: active
+                                ? context.colors.purple.withValues(alpha: .15)
+                                : context.colors.panel,
                             borderRadius: BorderRadius.circular(11),
                             border: Border.all(
-                              color:
-                                  active ? kPurple.withOpacity(.45) : kBorder,
+                              color: active
+                                  ? context.colors.purple.withValues(alpha: .45)
+                                  : context.colors.border,
                             ),
                           ),
                           child: Text(
                             tabs[i],
                             style: TextStyle(
-                              color: active ? kPurple : kMuted,
+                              color: active
+                                  ? context.colors.purple
+                                  : context.colors.muted,
                               fontSize: 11,
                               fontWeight: FontWeight.w900,
                               letterSpacing: 1,
@@ -4693,14 +6938,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(28),
-            child: _trainingContent(),
+            child: _trainingContentDesktop(),
           ),
         ),
       ],
     );
   }
 
-  Widget _trainingContent() {
+  Widget _trainingContentDesktop() {
     switch (trainingTab) {
       case 0:
         return _routinesTab();
@@ -4709,15 +6954,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       case 2:
         return _trainersTab();
       case 3:
+        return _classTypesTabDesktop();
+      case 4:
         return _scheduleTab();
       default:
         return _routinesTab();
     }
   }
-
-  // ═══════════════════════════════════════════════════════════
-  // RUTINAS TAB
-  // ═══════════════════════════════════════════════════════════
 
   Widget _routinesTab() {
     return Column(
@@ -4725,11 +6968,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       children: [
         Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Text(
                 'RUTINAS DISPONIBLES',
                 style: TextStyle(
-                  color: kWhite,
+                  color: context.colors.white,
                   fontSize: 15,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1,
@@ -4744,7 +6987,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: kRed,
+                backgroundColor: context.colors.red,
                 foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -4757,12 +7000,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         ),
         const SizedBox(height: 20),
         if (routines.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
+          Padding(
+            padding: const EdgeInsets.all(40),
             child: Center(
               child: Text(
                 'Sin rutinas creadas',
-                style: TextStyle(color: kMuted),
+                style: TextStyle(color: context.colors.muted),
               ),
             ),
           )
@@ -4788,17 +7031,17 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _routineCard(Map<String, dynamic> routine) {
     final level = routine['level'].toString();
     final levelColor = level == 'Principiante'
-        ? kGreen
+        ? context.colors.green
         : level == 'Intermedio'
-            ? kYellow
-            : kRed;
+            ? context.colors.yellow
+            : context.colors.red;
 
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: kPanel,
+        color: context.colors.panel,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorder),
+        border: Border.all(color: context.colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4808,8 +7051,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               Expanded(
                 child: Text(
                   routine['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
+                  style: TextStyle(
+                    color: context.colors.white,
                     fontSize: 14,
                     fontWeight: FontWeight.w900,
                   ),
@@ -4818,25 +7061,27 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 ),
               ),
               PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert_rounded,
-                    color: kMuted, size: 20),
-                color: kPanel2,
+                icon: Icon(Icons.more_vert_rounded,
+                    color: context.colors.muted, size: 20),
+                color: context.colors.panel2,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
-                  side: const BorderSide(color: kBorder),
+                  side: BorderSide(color: context.colors.border),
                 ),
                 onSelected: (value) {
                   if (value == 'edit') editRoutine(routine);
                   if (value == 'delete') deleteRoutine(routine);
                 },
-                itemBuilder: (_) => const [
+                itemBuilder: (_) => [
                   PopupMenuItem(
                     value: 'edit',
                     child: Row(
                       children: [
-                        Icon(Icons.edit_rounded, color: kYellow, size: 16),
-                        SizedBox(width: 10),
-                        Text('Editar', style: TextStyle(color: kWhite)),
+                        Icon(Icons.edit_rounded,
+                            color: context.colors.yellow, size: 16),
+                        const SizedBox(width: 10),
+                        Text('Editar',
+                            style: TextStyle(color: context.colors.white)),
                       ],
                     ),
                   ),
@@ -4844,9 +7089,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     value: 'delete',
                     child: Row(
                       children: [
-                        Icon(Icons.delete_rounded, color: kRed, size: 16),
-                        SizedBox(width: 10),
-                        Text('Eliminar', style: TextStyle(color: kWhite)),
+                        Icon(Icons.delete_rounded,
+                            color: context.colors.red, size: 16),
+                        const SizedBox(width: 10),
+                        Text('Eliminar',
+                            style: TextStyle(color: context.colors.white)),
                       ],
                     ),
                   ),
@@ -4871,14 +7118,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               Expanded(
                 child: Text(
                   routine['equipment'].toString(),
-                  style: const TextStyle(color: kMuted, fontSize: 11),
+                  style: TextStyle(color: context.colors.muted, fontSize: 11),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               Text(
                 '${routine['assigned']} asignados',
-                style: const TextStyle(
-                  color: kPurple,
+                style: TextStyle(
+                  color: context.colors.purple,
                   fontSize: 11,
                   fontWeight: FontWeight.w800,
                 ),
@@ -4893,12 +7140,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _miniStat(IconData icon, String text) {
     return Row(
       children: [
-        Icon(icon, color: kMuted, size: 14),
+        Icon(icon, color: context.colors.muted, size: 14),
         const SizedBox(width: 5),
         Text(
           text,
-          style: const TextStyle(
-            color: kWhite,
+          style: TextStyle(
+            color: context.colors.white,
             fontSize: 11,
             fontWeight: FontWeight.w700,
           ),
@@ -4906,10 +7153,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       ],
     );
   }
-
-  // ═══════════════════════════════════════════════════════════
-  // EJERCICIOS TAB
-  // ═══════════════════════════════════════════════════════════
 
   Widget _exercisesTab() {
     final muscles = [
@@ -4931,11 +7174,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       children: [
         Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Text(
                 'BIBLIOTECA DE EJERCICIOS',
                 style: TextStyle(
-                  color: kWhite,
+                  color: context.colors.white,
                   fontSize: 15,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1,
@@ -4950,7 +7193,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: kPurple,
+                backgroundColor: context.colors.purple,
                 foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -4974,20 +7217,24 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   onTap: () => setState(() => exerciseFilter = m),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
-                    ),
+                        horizontal: 16, vertical: 10),
                     decoration: BoxDecoration(
-                      color: active ? kPurple.withOpacity(.15) : kPanel,
+                      color: active
+                          ? context.colors.purple.withValues(alpha: .15)
+                          : context.colors.panel,
                       borderRadius: BorderRadius.circular(11),
                       border: Border.all(
-                        color: active ? kPurple.withOpacity(.45) : kBorder,
+                        color: active
+                            ? context.colors.purple.withValues(alpha: .45)
+                            : context.colors.border,
                       ),
                     ),
                     child: Text(
                       m.toUpperCase(),
                       style: TextStyle(
-                        color: active ? kPurple : kMuted,
+                        color: active
+                            ? context.colors.purple
+                            : context.colors.muted,
                         fontSize: 10,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 1,
@@ -5001,21 +7248,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         ),
         const SizedBox(height: 20),
         if (filtered.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
+          Padding(
+            padding: const EdgeInsets.all(40),
             child: Center(
               child: Text(
                 'Sin ejercicios para este filtro',
-                style: TextStyle(color: kMuted),
+                style: TextStyle(color: context.colors.muted),
               ),
             ),
           )
         else
           Container(
             decoration: BoxDecoration(
-              color: kPanel,
+              color: context.colors.panel,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: kBorder),
+              border: Border.all(color: context.colors.border),
             ),
             child: Column(
               children: filtered.map((e) => _exerciseRow(e)).toList(),
@@ -5028,8 +7275,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _exerciseRow(Map<String, dynamic> exercise) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: kBorder)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: context.colors.border)),
       ),
       child: Row(
         children: [
@@ -5037,12 +7284,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             width: 38,
             height: 38,
             decoration: BoxDecoration(
-              color: kPurple.withOpacity(0.12),
+              color: context.colors.purple.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(
+            child: Icon(
               Icons.fitness_center_rounded,
-              color: kPurple,
+              color: context.colors.purple,
               size: 18,
             ),
           ),
@@ -5053,15 +7300,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               children: [
                 Text(
                   exercise['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
+                  style: TextStyle(
+                    color: context.colors.white,
                     fontSize: 13,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
                 Text(
                   '${exercise['muscle']} · ${exercise['level']}',
-                  style: const TextStyle(color: kMuted, fontSize: 11),
+                  style: TextStyle(color: context.colors.muted, fontSize: 11),
                 ),
               ],
             ),
@@ -5071,8 +7318,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(width: 16),
           Text(
             '${exercise['weight']} kg',
-            style: const TextStyle(
-              color: kYellow,
+            style: TextStyle(
+              color: context.colors.yellow,
               fontSize: 12,
               fontWeight: FontWeight.w900,
             ),
@@ -5080,42 +7327,63 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(width: 8),
           IconButton(
             onPressed: () => editExercise(exercise),
-            icon: const Icon(Icons.edit_rounded, color: kYellow, size: 18),
+            icon: Icon(Icons.edit_rounded,
+                color: context.colors.yellow, size: 18),
           ),
           IconButton(
             onPressed: () => deleteExercise(exercise),
-            icon: const Icon(Icons.delete_rounded, color: kRed, size: 18),
+            icon:
+                Icon(Icons.delete_rounded, color: context.colors.red, size: 18),
           ),
         ],
       ),
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // ENTRENADORES TAB
-  // ═══════════════════════════════════════════════════════════
-
   Widget _trainersTab() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'EQUIPO DE ENTRENADORES',
-          style: TextStyle(
-            color: kWhite,
-            fontSize: 15,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 1,
-          ),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'EQUIPO DE ENTRENADORES',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                ),
+              ),
+            ),
+            ElevatedButton.icon(
+              onPressed: addTrainer,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text(
+                'NUEVO ENTRENADOR',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: context.colors.green,
+                foregroundColor: Colors.black,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 20),
         if (trainers.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
+          Padding(
+            padding: const EdgeInsets.all(40),
             child: Center(
               child: Text(
                 'Sin entrenadores registrados',
-                style: TextStyle(color: kMuted),
+                style: TextStyle(color: context.colors.muted),
               ),
             ),
           )
@@ -5142,9 +7410,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: kPanel,
+        color: context.colors.panel,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorder),
+        border: Border.all(color: context.colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5155,14 +7423,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 width: 46,
                 height: 46,
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(colors: [kPurple, kRed]),
+                  gradient: LinearGradient(
+                      colors: [context.colors.purple, context.colors.red]),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 alignment: Alignment.center,
                 child: Text(
                   trainer['name'].toString().substring(0, 1).toUpperCase(),
                   style: const TextStyle(
-                    color: kWhite,
+                    color: Colors.white,
                     fontSize: 20,
                     fontWeight: FontWeight.w900,
                   ),
@@ -5175,8 +7444,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   children: [
                     Text(
                       trainer['name'].toString(),
-                      style: const TextStyle(
-                        color: kWhite,
+                      style: TextStyle(
+                        color: context.colors.white,
                         fontSize: 14,
                         fontWeight: FontWeight.w900,
                       ),
@@ -5185,46 +7454,87 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     ),
                     Text(
                       trainer['specialty'].toString(),
-                      style: const TextStyle(color: kPurple, fontSize: 11),
+                      style:
+                          TextStyle(color: context.colors.purple, fontSize: 11),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ],
                 ),
               ),
+              PopupMenuButton<String>(
+                icon: Icon(Icons.more_vert_rounded,
+                    color: context.colors.muted, size: 20),
+                color: context.colors.panel2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(color: context.colors.border),
+                ),
+                onSelected: (value) {
+                  if (value == 'edit') editTrainer(trainer);
+                  if (value == 'delete') deleteTrainer(trainer);
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'edit',
+                    child: Row(
+                      children: [
+                        Icon(Icons.edit_rounded,
+                            color: context.colors.yellow, size: 16),
+                        const SizedBox(width: 10),
+                        Text('Editar',
+                            style: TextStyle(color: context.colors.white)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'delete',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete_rounded,
+                            color: context.colors.red, size: 16),
+                        const SizedBox(width: 10),
+                        Text('Eliminar',
+                            style: TextStyle(color: context.colors.white)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
           const Spacer(),
           Row(
             children: [
-              const Icon(Icons.star_rounded, color: kYellow, size: 16),
+              Icon(Icons.star_rounded, color: context.colors.yellow, size: 16),
               const SizedBox(width: 4),
               Text(
                 trainer['rating'].toString(),
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: context.colors.white,
                   fontSize: 12,
                   fontWeight: FontWeight.w800,
                 ),
               ),
               const SizedBox(width: 16),
-              const Icon(Icons.people_rounded, color: kMuted, size: 14),
+              Icon(Icons.people_rounded, color: context.colors.muted, size: 14),
               const SizedBox(width: 4),
               Text(
                 '${trainer['clients']} clientes',
-                style: const TextStyle(color: kMuted, fontSize: 11),
+                style: TextStyle(color: context.colors.muted, fontSize: 11),
               ),
             ],
           ),
           const SizedBox(height: 10),
           Row(
             children: [
-              const Icon(Icons.schedule_rounded, color: kGreen, size: 14),
+              Icon(Icons.schedule_rounded,
+                  color: context.colors.green, size: 14),
               const SizedBox(width: 6),
               Text(
                 trainer['schedule'].toString(),
-                style: const TextStyle(
-                  color: kWhite,
+                style: TextStyle(
+                  color: context.colors.white,
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
                 ),
@@ -5236,9 +7546,167 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // HORARIO TAB
-  // ═══════════════════════════════════════════════════════════
+  Widget _classTypesTabDesktop() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'TIPOS DE CLASE',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                ),
+              ),
+            ),
+            ElevatedButton.icon(
+              onPressed: addClassType,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text(
+                'NUEVO TIPO',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: context.colors.orange,
+                foregroundColor: Colors.black,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        if (classTypes.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(40),
+            child: Center(
+              child: Text(
+                'Sin tipos de clase',
+                style: TextStyle(color: context.colors.muted),
+              ),
+            ),
+          )
+        else
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final crossCount = constraints.maxWidth > 1100 ? 4 : 3;
+              return GridView.count(
+                crossAxisCount: crossCount,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 16,
+                childAspectRatio: 2.2,
+                children: classTypes.map((ct) => _classTypeCard(ct)).toList(),
+              );
+            },
+          ),
+      ],
+    );
+  }
+
+  Widget _classTypeCard(Map<String, dynamic> ct) {
+    final color = Color(ct['color'] as int);
+    final iconData = _iconFromCodePoint(ct['icon'] as int);
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: .3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .15),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withValues(alpha: .35)),
+            ),
+            alignment: Alignment.center,
+            child: Icon(iconData, color: color, size: 24),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  ct['name'].toString().toUpperCase(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.5,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '#${color.value.toRadixString(16).substring(2).toUpperCase()}',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          PopupMenuButton<String>(
+            icon: Icon(Icons.more_vert_rounded,
+                color: context.colors.muted, size: 20),
+            color: context.colors.panel2,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: context.colors.border),
+            ),
+            onSelected: (value) {
+              if (value == 'edit') editClassType(ct);
+              if (value == 'delete') deleteClassType(ct);
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'edit',
+                child: Row(
+                  children: [
+                    Icon(Icons.edit_rounded,
+                        color: context.colors.yellow, size: 16),
+                    const SizedBox(width: 10),
+                    Text('Editar',
+                        style: TextStyle(color: context.colors.white)),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'delete',
+                child: Row(
+                  children: [
+                    Icon(Icons.delete_rounded,
+                        color: context.colors.red, size: 16),
+                    const SizedBox(width: 10),
+                    Text('Eliminar',
+                        style: TextStyle(color: context.colors.white)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _scheduleTab() {
     final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
@@ -5248,11 +7716,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       children: [
         Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Text(
                 'CALENDARIO SEMANAL',
                 style: TextStyle(
-                  color: kWhite,
+                  color: context.colors.white,
                   fontSize: 15,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1,
@@ -5267,7 +7735,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: kGreen,
+                backgroundColor: context.colors.green,
                 foregroundColor: Colors.black,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -5293,22 +7761,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 margin: const EdgeInsets.only(right: 14),
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: kPanel,
+                  color: context.colors.panel,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: kBorder),
+                  border: Border.all(color: context.colors.border),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.calendar_today_rounded,
-                            color: kGreen, size: 16),
+                        Icon(Icons.calendar_today_rounded,
+                            color: context.colors.green, size: 16),
                         const SizedBox(width: 8),
                         Text(
                           day,
-                          style: const TextStyle(
-                            color: kWhite,
+                          style: TextStyle(
+                            color: context.colors.white,
                             fontSize: 12,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 1,
@@ -5318,11 +7786,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     ),
                     const SizedBox(height: 14),
                     if (dayClasses.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 20),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 20),
                         child: Text(
                           'Sin clases',
-                          style: TextStyle(color: kMuted, fontSize: 11),
+                          style: TextStyle(
+                              color: context.colors.muted, fontSize: 11),
                         ),
                       )
                     else
@@ -5338,22 +7807,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _classSlot(Map<String, dynamic> classItem) {
-    final typeColors = {
-      'YOGA': kPurple,
-      'SPINNING': kYellow,
-      'CROSSFIT': kRed,
-      'BOXEO': kGreen,
-      'PILATES': kPurple,
-    };
-    final color = typeColors[classItem['type']] ?? kWhite;
+    Color color = context.colors.purple;
+    for (final ct in classTypes) {
+      if (ct['name'].toString().toUpperCase() ==
+          classItem['type'].toString().toUpperCase()) {
+        color = Color(ct['color'] as int);
+        break;
+      }
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: kPanel2,
+        color: context.colors.panel2,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.3)),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -5363,7 +7832,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(0.15),
+                  color: color.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
@@ -5377,16 +7846,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ),
               const Spacer(),
               InkWell(
+                onTap: () => editClass(classItem),
+                child: Icon(Icons.edit_rounded,
+                    color: context.colors.yellow, size: 16),
+              ),
+              const SizedBox(width: 8),
+              InkWell(
                 onTap: () => deleteClass(classItem),
-                child: const Icon(Icons.close_rounded, color: kMuted, size: 16),
+                child: Icon(Icons.close_rounded,
+                    color: context.colors.red, size: 16),
               ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
             classItem['name'].toString(),
-            style: const TextStyle(
-              color: kWhite,
+            style: TextStyle(
+              color: context.colors.white,
               fontSize: 12,
               fontWeight: FontWeight.w900,
             ),
@@ -5396,7 +7872,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 4),
           Text(
             classItem['trainer'].toString(),
-            style: const TextStyle(color: kMuted, fontSize: 10),
+            style: TextStyle(color: context.colors.muted, fontSize: 10),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
@@ -5412,7 +7888,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         : (classItem['enrolled'] as int) /
                             (classItem['capacity'] as int),
                     minHeight: 4,
-                    backgroundColor: kBorder,
+                    backgroundColor: context.colors.border,
                     valueColor: AlwaysStoppedAnimation(color),
                   ),
                 ),
@@ -5420,7 +7896,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               const SizedBox(width: 8),
               Text(
                 '${classItem['enrolled']}/${classItem['capacity']}',
-                style: const TextStyle(color: kMuted, fontSize: 10),
+                style: TextStyle(color: context.colors.muted, fontSize: 10),
               ),
             ],
           ),
@@ -5430,10 +7906,528 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // FINANZAS
+  // CLIENTES
   // ═══════════════════════════════════════════════════════════
+  Widget _clientsPage() {
+    final isMobile = MediaQuery.of(context).size.width < 850;
+    if (isMobile) return _clientsPageMobile();
+    return _clientsPageDesktop();
+  }
 
-  Widget _financePage() {
+  Widget _clientsPageMobile() {
+    final query = searchController.text.toLowerCase();
+
+    var filtered = members.where((m) {
+      return m['name'].toString().toLowerCase().contains(query) ||
+          m['phone'].toString().toLowerCase().contains(query);
+    }).toList();
+
+    if (clientFilter != 'TODOS') {
+      filtered = filtered.where((m) {
+        if (clientFilter == 'ACTIVOS') return m['status'] == 'ACTIVO';
+        if (clientFilter == 'POR VENCER') {
+          return m['status'] == 'POR VENCER';
+        }
+        if (clientFilter == 'VENCIDOS') {
+          return m['status'] == 'VENCIDO';
+        }
+        return true;
+      }).toList();
+    }
+
+    final total = members.length;
+    final totalActivos = members.where((m) => m['status'] == 'ACTIVO').length;
+    final totalPorVencer =
+        members.where((m) => m['status'] == 'POR VENCER').length;
+    final totalVencidos = members.where((m) => m['status'] == 'VENCIDO').length;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Clientes',
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '$total ${total == 1 ? "registrado" : "registrados"}',
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            height: 54,
+            child: ElevatedButton.icon(
+              onPressed: addMember,
+              icon: const Icon(Icons.add_rounded, size: 20),
+              label: const Text(
+                'NUEVO CLIENTE',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 13,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: context.colors.red,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          Row(
+            children: [
+              Expanded(
+                child: _clientStatCard(
+                  icon: Icons.people_alt_rounded,
+                  color: context.colors.purple,
+                  value: '$total',
+                  label: 'Total',
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _clientStatCard(
+                  icon: Icons.check_circle_rounded,
+                  color: context.colors.green,
+                  value: '$totalActivos',
+                  label: 'Activos',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _clientStatCard(
+                  icon: Icons.warning_amber_rounded,
+                  color: context.colors.yellow,
+                  value: '$totalPorVencer',
+                  label: 'Por vencer',
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _clientStatCard(
+                  icon: Icons.block_rounded,
+                  color: context.colors.red,
+                  value: '$totalVencidos',
+                  label: 'Vencidos',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 22),
+          TextField(
+            controller: searchController,
+            onChanged: (_) => setState(() {}),
+            style: TextStyle(color: context.colors.white, fontSize: 14),
+            decoration: InputDecoration(
+              hintText: 'Buscar cliente...',
+              hintStyle: TextStyle(color: context.colors.muted, fontSize: 13),
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                color: context.colors.muted,
+                size: 20,
+              ),
+              filled: true,
+              fillColor: context.colors.panel,
+              contentPadding: const EdgeInsets.symmetric(vertical: 14),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide(color: context.colors.border),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(14),
+                borderSide: BorderSide(color: context.colors.red, width: 1.5),
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _clientFilterChip('TODOS', 'Todos'),
+                const SizedBox(width: 8),
+                _clientFilterChip('ACTIVOS', 'Activos'),
+                const SizedBox(width: 8),
+                _clientFilterChip('POR VENCER', 'Por vencer'),
+                const SizedBox(width: 8),
+                _clientFilterChip('VENCIDOS', 'Vencidos'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (filtered.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(40),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Center(
+                child: Column(
+                  children: [
+                    Icon(
+                      Icons.search_off_rounded,
+                      color: context.colors.muted,
+                      size: 40,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Sin resultados',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Prueba con otro filtro o búsqueda',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            ...filtered.map((m) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _clientRowMobile(m),
+                )),
+        ],
+      ),
+    );
+  }
+
+  Widget _clientStatCard({
+    required IconData icon,
+    required Color color,
+    required String value,
+    required String label,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.colors.cardBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: context.colors.white.withValues(alpha: .05),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .14),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, color: color, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  value,
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                    height: 1,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _clientFilterChip(String value, String label) {
+    final selected = clientFilter == value;
+    return GestureDetector(
+      onTap: () => setState(() => clientFilter = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+              ? context.colors.red.withValues(alpha: .15)
+              : context.colors.panel,
+          borderRadius: BorderRadius.circular(30),
+          border: Border.all(
+            color: selected
+                ? context.colors.red.withValues(alpha: .55)
+                : context.colors.border,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? context.colors.red : context.colors.muted,
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _clientRowMobile(Map<String, dynamic> m) {
+    final status = m['status'].toString();
+
+    Color color = context.colors.green;
+    if (status == 'POR VENCER') color = context.colors.yellow;
+    if (status == 'VENCIDO') color = context.colors.red;
+    if (status == 'PENDIENTE') color = context.colors.purple;
+
+    final name = m['name'].toString();
+    final initial = name.isEmpty ? '?' : name[0].toUpperCase();
+    final phone = m['phone'].toString();
+    final plan = m['plan'].toString();
+    final expiry = m['expiry'].toString();
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => showClientDetail(m),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: context.colors.panel,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: context.colors.border),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 50,
+              height: 50,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [color, color.withValues(alpha: .55)],
+                ),
+                borderRadius: BorderRadius.circular(15),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                initial,
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: TextStyle(
+                            color: context.colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: .12),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: color.withValues(alpha: .40),
+                          ),
+                        ),
+                        child: Text(
+                          status,
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    phone,
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 12,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Container(
+                        width: 4,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: color,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          '$plan · vence $expiry',
+                          style: TextStyle(
+                            color: context.colors.muted,
+                            fontSize: 11,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: PopupMenuButton<String>(
+                padding: EdgeInsets.zero,
+                icon: Icon(
+                  Icons.more_vert_rounded,
+                  color: context.colors.muted,
+                  size: 20,
+                ),
+                color: context.colors.panel2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(color: context.colors.border),
+                ),
+                onSelected: (value) {
+                  if (value == 'edit') editMember(m);
+                  if (value == 'delete') deleteMember(m);
+                  if (value == 'view') showClientDetail(m);
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem<String>(
+                    value: 'view',
+                    child: Row(
+                      children: [
+                        Icon(Icons.person_rounded,
+                            color: context.colors.green, size: 18),
+                        const SizedBox(width: 10),
+                        Text('Ver perfil',
+                            style: TextStyle(color: context.colors.white)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'edit',
+                    child: Row(
+                      children: [
+                        Icon(Icons.edit_rounded,
+                            color: context.colors.yellow, size: 18),
+                        const SizedBox(width: 10),
+                        Text('Editar',
+                            style: TextStyle(color: context.colors.white)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete_rounded,
+                            color: context.colors.red, size: 18),
+                        const SizedBox(width: 10),
+                        Text('Eliminar',
+                            style: TextStyle(color: context.colors.red)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _clientsPageDesktop() {
+    final query = searchController.text.toLowerCase();
+
+    var filtered = members.where((m) {
+      return m['name'].toString().toLowerCase().contains(query) ||
+          m['phone'].toString().toLowerCase().contains(query);
+    }).toList();
+
+    if (clientFilter != 'TODOS') {
+      filtered = filtered.where((m) {
+        if (clientFilter == 'ACTIVOS') return m['status'] == 'ACTIVO';
+        if (clientFilter == 'POR VENCER') {
+          return m['status'] == 'POR VENCER';
+        }
+        if (clientFilter == 'VENCIDOS') {
+          return m['status'] == 'VENCIDO';
+        }
+        return true;
+      }).toList();
+    }
+
+    final total = members.length;
+    final totalActivos = members.where((m) => m['status'] == 'ACTIVO').length;
+    final totalPorVencer =
+        members.where((m) => m['status'] == 'POR VENCER').length;
+    final totalVencidos = members.where((m) => m['status'] == 'VENCIDO').length;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -5441,23 +8435,2108 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'CLIENTES',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Gestión completa de tus clientes',
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: addMember,
+                icon: const Icon(Icons.add_rounded, size: 20),
+                label: const Text(
+                  'NUEVO CLIENTE',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 12,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.colors.red,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          GridView.count(
+            crossAxisCount: 4,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            crossAxisSpacing: 14,
+            mainAxisSpacing: 14,
+            childAspectRatio: 0.95,
+            children: [
+              _metric('TOTAL CLIENTES', total.toString(),
+                  Icons.people_alt_rounded, context.colors.purple,
+                  trend: '+12',
+                  subtitle: 'todos',
+                  chartData: const [
+                    0.4,
+                    0.5,
+                    0.55,
+                    0.6,
+                    0.65,
+                    0.75,
+                    0.85,
+                    1.0
+                  ]),
+              _metric('ACTIVOS', totalActivos.toString(),
+                  Icons.check_circle_rounded, context.colors.green,
+                  trend: '+8.4%',
+                  subtitle: 'al día',
+                  chartData: const [
+                    0.5,
+                    0.55,
+                    0.6,
+                    0.58,
+                    0.7,
+                    0.75,
+                    0.85,
+                    1.0
+                  ]),
+              _metric('POR VENCER', totalPorVencer.toString(),
+                  Icons.warning_amber_rounded, context.colors.yellow,
+                  trend: '+3.2%',
+                  subtitle: 'próximos 7 días',
+                  chartData: const [0.3, 0.4, 0.35, 0.5, 0.45, 0.55, 0.5, 0.6]),
+              _metric('VENCIDOS', totalVencidos.toString(), Icons.block_rounded,
+                  context.colors.red,
+                  trend: '-1.1%',
+                  subtitle: 'requieren renovar',
+                  chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5]),
+            ],
+          ),
+          const SizedBox(height: 24),
+          _card(
+            title: 'BUSCAR Y FILTRAR',
+            child: Column(
+              children: [
+                TextField(
+                  controller: searchController,
+                  onChanged: (_) => setState(() {}),
+                  style: TextStyle(color: context.colors.white),
+                  decoration: _inputDecoration(
+                    context,
+                    'Buscar por nombre o teléfono',
+                    prefixIcon: Icons.search_rounded,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    _filterChip('TODOS'),
+                    const SizedBox(width: 8),
+                    _filterChip('ACTIVOS'),
+                    const SizedBox(width: 8),
+                    _filterChip('POR VENCER'),
+                    const SizedBox(width: 8),
+                    _filterChip('VENCIDOS'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (filtered.isEmpty)
+            _card(
+              title: 'SIN RESULTADOS',
+              child: Padding(
+                padding: const EdgeInsets.all(30),
+                child: Center(
+                  child: Text(
+                    'No se encontraron clientes con esos filtros.',
+                    style: TextStyle(color: context.colors.muted),
+                  ),
+                ),
+              ),
+            )
+          else
+            ...filtered.map((m) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _clientRow(m),
+                )),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterChip(String label) {
+    final selected = clientFilter == label;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(13),
+        onTap: () => setState(() => clientFilter = label),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: selected
+                ? context.colors.red.withValues(alpha: .15)
+                : context.colors.panel2,
+            borderRadius: BorderRadius.circular(13),
+            border: Border.all(
+              color: selected
+                  ? context.colors.red.withValues(alpha: .45)
+                  : context.colors.border,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? context.colors.red : context.colors.muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _clientRow(Map<String, dynamic> m) {
+    final status = m['status'].toString();
+
+    Color color = context.colors.green;
+    if (status == 'POR VENCER') color = context.colors.yellow;
+    if (status == 'VENCIDO') color = context.colors.red;
+    if (status == 'PENDIENTE') color = context.colors.purple;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => showClientDetail(m),
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: context.colors.panel,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: context.colors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 54,
+              height: 54,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [color, color.withValues(alpha: .5)],
+                ),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                m['name'].toString().isEmpty
+                    ? '?'
+                    : m['name'].toString().substring(0, 1).toUpperCase(),
+                style: const TextStyle(
+                  color: Colors.black,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        m['name'].toString(),
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      _statusChip(status, color),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${m['phone']} · ${m['plan']} · vence ${m['expiry']}',
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Pagos: ${m['payments']} · Total: ${formatPrice((m['totalPaid'] as num).toDouble())}',
+                    style: TextStyle(
+                      color: context.colors.green,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              onPressed: () => editMember(m),
+              icon: Icon(
+                Icons.edit_rounded,
+                color: context.colors.yellow,
+                size: 20,
+              ),
+              tooltip: 'Editar',
+            ),
+            IconButton(
+              onPressed: () => deleteMember(m),
+              icon: Icon(
+                Icons.delete_rounded,
+                color: context.colors.red,
+                size: 20,
+              ),
+              tooltip: 'Eliminar',
+            ),
+            IconButton(
+              onPressed: () {
+                final ctx = context;
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      'Notificando a ${m['name']} por WhatsApp...',
+                    ),
+                  ),
+                );
+              },
+              icon: FaIcon(
+                FontAwesomeIcons.whatsapp,
+                color: context.colors.green,
+                size: 20,
+              ),
+              tooltip: 'WhatsApp',
+            ),
+            IconButton(
+              onPressed: () => showClientDetail(m),
+              icon: Icon(
+                Icons.arrow_forward_ios_rounded,
+                color: context.colors.muted,
+                size: 16,
+              ),
+              tooltip: 'Ver detalle',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // QR CENTER
+  // ═══════════════════════════════════════════════════════════
+  Widget _qrCenter() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'ACCESO QR',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Genera y administra el codigo de acceso del gimnasio',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: generateGymQr,
+                icon: const Icon(Icons.refresh_rounded, size: 20),
+                label: const Text(
+                  'REGENERAR QR',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 12,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.colors.green,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 2,
+                child: _card(
+                  title: 'QR DEL GIMNASIO',
+                  child: Column(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: context.colors.green.withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: context.colors.green.withValues(alpha: .35),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: context.colors.green,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              qrTimeLeft,
+                              style: TextStyle(
+                                color: context.colors.green,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Screenshot(
+                        controller: _qrScreenshotController,
+                        child: Container(
+                          padding: const EdgeInsets.all(22),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(24),
+                            boxShadow: [
+                              BoxShadow(
+                                color:
+                                    context.colors.green.withValues(alpha: .20),
+                                blurRadius: 30,
+                              ),
+                            ],
+                          ),
+                          child: QrImageView(
+                            data:
+                                qrToken.isEmpty ? 'SYNTH-GYM-LOADING' : qrToken,
+                            size: 260,
+                            backgroundColor: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: context.colors.panel2,
+                          borderRadius: BorderRadius.circular(13),
+                          border: Border.all(color: context.colors.border),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              'CODIGO DEL DIA',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              qrToken.isEmpty ? 'Generando...' : qrToken,
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: downloadQrAsPng,
+                              icon: const Icon(
+                                Icons.download_rounded,
+                                size: 18,
+                              ),
+                              label: const Text(
+                                'DESCARGAR PNG',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: context.colors.white,
+                                side: BorderSide(color: context.colors.border),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(13),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: shareQrPng,
+                              icon: const Icon(
+                                Icons.share_rounded,
+                                size: 18,
+                              ),
+                              label: const Text(
+                                'COMPARTIR',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 11,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: context.colors.purple,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(13),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                flex: 1,
+                child: Column(
+                  children: [
+                    _card(
+                      title: 'MODO DE RENOVACION',
+                      child: Column(
+                        children: [
+                          _modeOption(
+                            'DIARIO',
+                            'Se regenera cada dia',
+                            Icons.calendar_today_rounded,
+                            context.colors.yellow,
+                          ),
+                          const SizedBox(height: 8),
+                          _modeOption(
+                            'SEMANAL',
+                            'Se regenera cada semana',
+                            Icons.date_range_rounded,
+                            context.colors.purple,
+                          ),
+                          const SizedBox(height: 8),
+                          _modeOption(
+                            'FIJO',
+                            'No se regenera',
+                            Icons.lock_rounded,
+                            context.colors.green,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _card(
+                      title: 'INFO',
+                      child: Column(
+                        children: [
+                          _infoRow('Modo actual', qrMode),
+                          const SizedBox(height: 8),
+                          _infoRow(
+                            'Generado',
+                            '${qrGenerated.hour.toString().padLeft(2, '0')}:${qrGenerated.minute.toString().padLeft(2, '0')}',
+                          ),
+                          const SizedBox(height: 8),
+                          _infoRow(
+                            'Expira',
+                            qrMode == 'FIJO'
+                                ? 'Nunca'
+                                : '${qrExpires.day}/${qrExpires.month}',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              Expanded(
+                child: _accessStat(
+                  'DENTRO AHORA',
+                  inside.toString(),
+                  context.colors.green,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _accessStat(
+                  'ENTRADAS HOY',
+                  activities
+                      .where((a) => a['type'] == 'ENTRADA')
+                      .length
+                      .toString(),
+                  context.colors.purple,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _accessStat(
+                  'BLOQUEADOS',
+                  activities
+                      .where((a) => a['type'] == 'BLOQUEADO')
+                      .length
+                      .toString(),
+                  context.colors.red,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _accessStat(
+                  'SALIDAS',
+                  activities
+                      .where((a) => a['type'] == 'SALIDA')
+                      .length
+                      .toString(),
+                  context.colors.yellow,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          _card(
+            title: 'ACTIVIDAD DE ACCESO EN VIVO',
+            action: 'VER TODO',
+            onAction: showActivity,
+            child: activities.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Center(
+                      child: Text(
+                        'Sin accesos registrados',
+                        style: TextStyle(color: context.colors.muted),
+                      ),
+                    ),
+                  )
+                : Column(
+                    children: activities.take(8).map((log) {
+                      final authorized = log['type'] != 'BLOQUEADO';
+                      final color = authorized
+                          ? context.colors.green
+                          : context.colors.red;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: context.colors.panel2,
+                          borderRadius: BorderRadius.circular(13),
+                          border:
+                              Border.all(color: color.withValues(alpha: .20)),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 42,
+                              height: 42,
+                              decoration: BoxDecoration(
+                                color: color.withValues(alpha: .12),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                authorized
+                                    ? Icons.check_circle_rounded
+                                    : Icons.block_rounded,
+                                color: color,
+                                size: 22,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    log['name'].toString(),
+                                    style: TextStyle(
+                                      color: context.colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    log['type'].toString(),
+                                    style: TextStyle(
+                                      color: authorized
+                                          ? context.colors.muted
+                                          : color,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Text(
+                              log['time'].toString(),
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              Expanded(
+                child: _button(
+                  'ESCANEAR CLIENTE',
+                  context.colors.red,
+                  showAccessScanner,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _button(
+                  'REGISTRAR SALIDA',
+                  context.colors.yellow,
+                  registerExit,
+                  darkText: true,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _qrCenterMobile() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'ACCESO QR',
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 1,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Genera el codigo de acceso del gimnasio',
+            style: TextStyle(color: context.colors.muted, fontSize: 12),
+          ),
+          const SizedBox(height: 20),
+          _button(
+            'REGENERAR QR',
+            context.colors.green,
+            generateGymQr,
+            darkText: true,
+          ),
+          const SizedBox(height: 20),
+          _card(
+            title: 'QR DEL GIMNASIO',
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.colors.green.withValues(alpha: .15),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    qrTimeLeft,
+                    style: TextStyle(
+                      color: context.colors.green,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Screenshot(
+                  controller: _qrScreenshotController,
+                  child: Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: QrImageView(
+                      data: qrToken.isEmpty ? 'SYNTH-GYM-LOADING' : qrToken,
+                      size: 200,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  qrToken.isEmpty ? 'Generando...' : qrToken,
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: downloadQrAsPng,
+                        icon: const Icon(Icons.download_rounded, size: 16),
+                        label: const Text(
+                          'DESCARGAR',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 10,
+                          ),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: context.colors.white,
+                          side: BorderSide(color: context.colors.border),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: shareQrPng,
+                        icon: const Icon(Icons.share_rounded, size: 16),
+                        label: const Text(
+                          'COMPARTIR',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 10,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: context.colors.purple,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _card(
+            title: 'MODO',
+            child: Column(
+              children: [
+                _modeOption(
+                  'DIARIO',
+                  'Cada dia',
+                  Icons.calendar_today_rounded,
+                  context.colors.yellow,
+                ),
+                const SizedBox(height: 8),
+                _modeOption(
+                  'SEMANAL',
+                  'Cada semana',
+                  Icons.date_range_rounded,
+                  context.colors.purple,
+                ),
+                const SizedBox(height: 8),
+                _modeOption(
+                  'FIJO',
+                  'Nunca',
+                  Icons.lock_rounded,
+                  context.colors.green,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _card(
+            title: 'RESUMEN DEL DIA',
+            child: Column(
+              children: [
+                _accessStat(
+                    'DENTRO AHORA', inside.toString(), context.colors.green),
+                const SizedBox(height: 12),
+                _accessStat(
+                  'ENTRADAS HOY',
+                  activities
+                      .where((a) => a['type'] == 'ENTRADA')
+                      .length
+                      .toString(),
+                  context.colors.purple,
+                ),
+                const SizedBox(height: 12),
+                _accessStat(
+                  'BLOQUEADOS',
+                  activities
+                      .where((a) => a['type'] == 'BLOQUEADO')
+                      .length
+                      .toString(),
+                  context.colors.red,
+                ),
+                const SizedBox(height: 12),
+                _accessStat(
+                  'SALIDAS',
+                  activities
+                      .where((a) => a['type'] == 'SALIDA')
+                      .length
+                      .toString(),
+                  context.colors.yellow,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _card(
+            title: 'ACTIVIDAD EN VIVO',
+            child: activities.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Center(
+                      child: Text(
+                        'Sin accesos registrados',
+                        style: TextStyle(color: context.colors.muted),
+                      ),
+                    ),
+                  )
+                : Column(
+                    children: activities.take(5).map((log) {
+                      final authorized = log['type'] != 'BLOQUEADO';
+                      final color = authorized
+                          ? context.colors.green
+                          : context.colors.red;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: context.colors.panel2,
+                          borderRadius: BorderRadius.circular(12),
+                          border:
+                              Border.all(color: color.withValues(alpha: .20)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              authorized
+                                  ? Icons.check_circle_rounded
+                                  : Icons.block_rounded,
+                              color: color,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                log['name'].toString(),
+                                style: TextStyle(
+                                  color: context.colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              log['time'].toString(),
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+          ),
+          const SizedBox(height: 20),
+          _button('ESCANEAR CLIENTE', context.colors.red, showAccessScanner),
+          const SizedBox(height: 10),
+          _button(
+            'REGISTRAR SALIDA',
+            context.colors.yellow,
+            registerExit,
+            darkText: true,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PLANES
+  // ═══════════════════════════════════════════════════════════
+  Widget _plansPage() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'PLANES Y MEMBRESÍAS',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Administra los planes disponibles del gimnasio',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: addPlan,
+                icon: const Icon(Icons.add_rounded, size: 20),
+                label: const Text(
+                  'NUEVO PLAN',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 12,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.colors.purple,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 16,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 28),
+          if (plans.isEmpty)
+            _card(
+              title: 'SIN PLANES',
+              child: Padding(
+                padding: const EdgeInsets.all(40),
+                child: Center(
+                  child: Text(
+                    'Crea tu primer plan con el botón NUEVO PLAN',
+                    style: TextStyle(color: context.colors.muted),
+                  ),
+                ),
+              ),
+            )
+          else
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 20,
+                mainAxisSpacing: 20,
+                childAspectRatio: 0.72,
+              ),
+              itemCount: plans.length,
+              itemBuilder: (context, index) {
+                final p = plans[index];
+                final price = (p['price'] as num).toDouble();
+                final name = p['name'].toString();
+
+                Color planColor = context.colors.purple;
+                IconData planIcon = Icons.card_membership_rounded;
+                String? badgeText;
+
+                if (name.toLowerCase().contains('basic')) {
+                  planColor = context.colors.yellow;
+                  planIcon = Icons.star_border_rounded;
+                } else if (name.toLowerCase().contains('premium')) {
+                  planColor = context.colors.red;
+                  planIcon = Icons.workspace_premium_rounded;
+                  badgeText = 'MÁS POPULAR';
+                } else if (name.toLowerCase().contains('elite')) {
+                  planColor = context.colors.purple;
+                  planIcon = Icons.diamond_rounded;
+                } else if (name.toLowerCase().contains('10')) {
+                  planColor = context.colors.green;
+                  planIcon = Icons.timer_rounded;
+                }
+
+                return _planCardPro(
+                  plan: p,
+                  price: price,
+                  name: name,
+                  planColor: planColor,
+                  planIcon: planIcon,
+                  badgeText: badgeText,
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _plansPageMobile() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'PLANES',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              IconButton(
+                onPressed: addPlan,
+                icon: Icon(
+                  Icons.add_circle_rounded,
+                  color: context.colors.purple,
+                  size: 30,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 15),
+          if (plans.isEmpty)
+            _card(
+              title: 'SIN PLANES',
+              child: Padding(
+                padding: const EdgeInsets.all(30),
+                child: Center(
+                  child: Text(
+                    'Crea tu primer plan',
+                    style: TextStyle(color: context.colors.muted),
+                  ),
+                ),
+              ),
+            )
+          else
+            ...plans.map((p) {
+              final price = (p['price'] as num).toDouble();
+              final name = p['name'].toString();
+
+              Color planColor = context.colors.purple;
+              IconData planIcon = Icons.card_membership_rounded;
+
+              if (name.toLowerCase().contains('basic')) {
+                planColor = context.colors.yellow;
+                planIcon = Icons.star_border_rounded;
+              } else if (name.toLowerCase().contains('premium')) {
+                planColor = context.colors.red;
+                planIcon = Icons.workspace_premium_rounded;
+              } else if (name.toLowerCase().contains('elite')) {
+                planColor = context.colors.purple;
+                planIcon = Icons.diamond_rounded;
+              } else if (name.toLowerCase().contains('10')) {
+                planColor = context.colors.green;
+                planIcon = Icons.timer_rounded;
+              }
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 14),
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: planColor.withValues(alpha: .35),
+                    width: 1.5,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: planColor.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: planColor.withValues(alpha: .35),
+                            ),
+                          ),
+                          child: Icon(
+                            planIcon,
+                            color: planColor,
+                            size: 22,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            name.toUpperCase(),
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1,
+                            ),
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          icon: Icon(
+                            Icons.more_vert_rounded,
+                            color: context.colors.muted,
+                            size: 20,
+                          ),
+                          color: context.colors.panel2,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            side: BorderSide(color: context.colors.border),
+                          ),
+                          onSelected: (value) {
+                            if (value == 'edit') {
+                              editPlan(p);
+                            } else if (value == 'delete') {
+                              deletePlan(p);
+                            }
+                          },
+                          itemBuilder: (context) => [
+                            PopupMenuItem<String>(
+                              value: 'edit',
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.edit_rounded,
+                                    color: context.colors.yellow,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text('Editar',
+                                      style: TextStyle(
+                                          color: context.colors.white)),
+                                ],
+                              ),
+                            ),
+                            PopupMenuItem<String>(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.delete_rounded,
+                                    color: context.colors.red,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text('Eliminar',
+                                      style: TextStyle(
+                                          color: context.colors.white)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      formatPrice(price),
+                      style: TextStyle(
+                        color: planColor,
+                        fontSize: 34,
+                        fontWeight: FontWeight.w900,
+                        height: 1.0,
+                      ),
+                    ),
+                    if (showConversion) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        formatPriceSecondary(price),
+                        style: TextStyle(
+                          color: context.colors.muted,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    Text(
+                      '${p['days']} días · ${p['access']}',
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () => sharePlan(p, price),
+                        icon: const Icon(Icons.share_rounded, size: 16),
+                        label: const Text(
+                          'COMPARTIR PLAN',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: planColor,
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _planCardPro({
+    required Map<String, dynamic> plan,
+    required double price,
+    required String name,
+    required Color planColor,
+    required IconData planIcon,
+    String? badgeText,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: planColor.withValues(alpha: .35),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: planColor.withValues(alpha: .08),
+            blurRadius: 30,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: planColor.withValues(alpha: .15),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: planColor.withValues(alpha: .35),
+                        ),
+                      ),
+                      child: Icon(planIcon, color: planColor, size: 26),
+                    ),
+                    const Spacer(),
+                    PopupMenuButton<String>(
+                      icon: Icon(
+                        Icons.more_vert_rounded,
+                        color: context.colors.muted,
+                        size: 20,
+                      ),
+                      color: context.colors.panel2,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        side: BorderSide(color: context.colors.border),
+                      ),
+                      onSelected: (value) {
+                        if (value == 'edit') {
+                          editPlan(plan);
+                        } else if (value == 'delete') {
+                          deletePlan(plan);
+                        } else if (value == 'share') {
+                          sharePlan(plan, price);
+                        }
+                      },
+                      itemBuilder: (context) => [
+                        PopupMenuItem<String>(
+                          value: 'edit',
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.edit_rounded,
+                                color: context.colors.yellow,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 10),
+                              Text('Editar',
+                                  style:
+                                      TextStyle(color: context.colors.white)),
+                            ],
+                          ),
+                        ),
+                        PopupMenuItem<String>(
+                          value: 'delete',
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.delete_rounded,
+                                color: context.colors.red,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 10),
+                              Text('Eliminar',
+                                  style:
+                                      TextStyle(color: context.colors.white)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  name.toUpperCase(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  formatPrice(price),
+                  style: TextStyle(
+                    color: planColor,
+                    fontSize: 42,
+                    fontWeight: FontWeight.w900,
+                    height: 1.0,
+                  ),
+                ),
+                if (showConversion) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    formatPriceSecondary(price),
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                Container(
+                  height: 1,
+                  color: context.colors.white.withValues(alpha: .06),
+                ),
+                const SizedBox(height: 16),
+                _featureItem(
+                  '${plan['days']} días de vigencia',
+                  true,
+                  planColor,
+                ),
+                const SizedBox(height: 10),
+                _featureItem(
+                  plan['access'].toString(),
+                  true,
+                  planColor,
+                ),
+                const SizedBox(height: 10),
+                _featureItem(
+                  'Acceso a todas las áreas',
+                  true,
+                  planColor,
+                ),
+                const Spacer(),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () => sharePlan(plan, price),
+                    icon: const Icon(Icons.share_rounded, size: 18),
+                    label: const Text(
+                      'COMPARTIR PLAN',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: planColor,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (badgeText != null)
+            Positioned(
+              top: 16,
+              right: 60,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: planColor,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: planColor.withValues(alpha: .4),
+                      blurRadius: 15,
+                    ),
+                  ],
+                ),
+                child: Text(
+                  badgeText,
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _featureItem(String text, bool included, Color color) {
+    return Row(
+      children: [
+        Container(
+          width: 22,
+          height: 22,
+          decoration: BoxDecoration(
+            color:
+                included ? color.withValues(alpha: .15) : context.colors.panel2,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Icon(
+            included ? Icons.check_rounded : Icons.close_rounded,
+            color: included ? color : context.colors.muted,
+            size: 14,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              color: included ? context.colors.white : context.colors.muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // FINANZAS
+  // ═══════════════════════════════════════════════════════════
+  Widget _financePage() {
+    final isMobile = MediaQuery.of(context).size.width < 850;
+    if (isMobile) return _financePageMobile();
+    return _financePageDesktop();
+  }
+
+  Widget _financePageMobile() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Finanzas',
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Control financiero del gimnasio',
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            height: 54,
+            child: ElevatedButton.icon(
+              onPressed: newPayment,
+              icon: const Icon(Icons.add_rounded, size: 20),
+              label: const Text(
+                'REGISTRAR PAGO',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 13,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: context.colors.green,
+                foregroundColor: Colors.black,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _financePeriodChip('HOY', 'Hoy'),
+                const SizedBox(width: 8),
+                _financePeriodChip('SEMANA', 'Semana'),
+                const SizedBox(width: 8),
+                _financePeriodChip('MES', 'Mes'),
+                const SizedBox(width: 8),
+                _financePeriodChip('AÑO', 'Año'),
+                const SizedBox(width: 8),
+                _financePeriodChip('TODO', 'Todo'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          _financeBigCard(
+            title: 'INGRESOS',
+            value: formatPrice(totalIncome),
+            trend: '+14.2%',
+            trendColor: context.colors.green,
+            color: context.colors.green,
+            chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _financeBigCard(
+                  title: 'EGRESOS',
+                  value: formatPrice(totalExpense),
+                  trend: '-3.1%',
+                  trendColor: context.colors.red,
+                  color: context.colors.red,
+                  chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _financeBigCard(
+                  title: 'BALANCE',
+                  value: formatPrice(balance),
+                  trend: '+11.8%',
+                  trendColor: context.colors.purple,
+                  color: context.colors.purple,
+                  chartData: const [0.3, 0.4, 0.5, 0.55, 0.65, 0.7, 0.85, 1.0],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: context.colors.cardBg,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                  color: context.colors.white.withValues(alpha: .05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'MÉTODOS DE PAGO',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  height: 180,
+                  child: _donutChart(),
+                ),
+                const SizedBox(height: 18),
+                ...paymentMethods.entries.map((e) {
+                  final color = _methodColor(e.key);
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: color,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            e.key,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          formatPrice(e.value),
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: context.colors.cardBg,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                  color: context.colors.white.withValues(alpha: .05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'TRANSACCIONES RECIENTES',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _financeTxChip('TODOS', 'Todos'),
+                      const SizedBox(width: 8),
+                      _financeTxChip('INGRESOS', 'Ingresos'),
+                      const SizedBox(width: 8),
+                      _financeTxChip('EGRESOS', 'Egresos'),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (filteredTransactions.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 30),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.receipt_long_outlined,
+                            color: context.colors.muted,
+                            size: 40,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Sin transacciones',
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Registra un pago para verlas aquí',
+                            style: TextStyle(
+                                color: context.colors.muted, fontSize: 11),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  ...filteredTransactions.take(10).map((t) {
+                    final isIncome = t['type'] == 'INGRESO';
+                    final amount = (t['amount'] as num).toDouble();
+                    final color =
+                        isIncome ? context.colors.green : context.colors.red;
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: .12),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              isIncome
+                                  ? Icons.arrow_downward_rounded
+                                  : Icons.arrow_upward_rounded,
+                              color: color,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  t['name'].toString(),
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${t['concept']} · ${t['method']}',
+                                  style: TextStyle(
+                                    color: context.colors.muted,
+                                    fontSize: 11,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                formatPrice(amount.abs()),
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                t['date'].toString(),
+                                style: TextStyle(
+                                  color: context.colors.muted,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: context.colors.cardBg,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                  color: context.colors.white.withValues(alpha: .05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'RANKING DE PLANES',
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (topPlans.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 30),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.card_membership_rounded,
+                            color: context.colors.muted,
+                            size: 40,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Sin datos de ventas',
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Los planes más vendidos aparecerán aquí',
+                            style: TextStyle(
+                                color: context.colors.muted, fontSize: 11),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  ...topPlans.map((p) {
+                    final maxSales = topPlans
+                        .map((e) => e['sales'] as int)
+                        .reduce((a, b) => a > b ? a : b);
+                    final percent =
+                        maxSales == 0 ? 0.0 : (p['sales'] as int) / maxSales;
+                    final color =
+                        _planColorByIndex((p['colorIndex'] as int?) ?? 0);
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                width: 32,
+                                height: 32,
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: .15),
+                                  borderRadius: BorderRadius.circular(9),
+                                ),
+                                child: Icon(
+                                  Icons.card_membership_rounded,
+                                  color: color,
+                                  size: 18,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      p['name'].toString().toUpperCase(),
+                                      style: TextStyle(
+                                        color: context.colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: 0.5,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${p['sales']} ventas',
+                                      style: TextStyle(
+                                        color: context.colors.muted,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Text(
+                                formatPrice((p['revenue'] as num).toDouble()),
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(20),
+                            child: LinearProgressIndicator(
+                              value: percent,
+                              minHeight: 6,
+                              backgroundColor: context.colors.panel2,
+                              valueColor: AlwaysStoppedAnimation<Color>(color),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _financePageDesktop() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       'FINANZAS',
                       style: TextStyle(
-                        color: kWhite,
+                        color: context.colors.white,
                         fontSize: 28,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 1,
                       ),
                     ),
-                    SizedBox(height: 6),
+                    const SizedBox(height: 6),
                     Text(
                       'Control financiero completo del gimnasio',
-                      style: TextStyle(color: kMuted, fontSize: 13),
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 13),
                     ),
                   ],
                 ),
@@ -5473,7 +10552,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   ),
                 ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: kGreen,
+                  backgroundColor: context.colors.green,
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 20,
@@ -5510,21 +10589,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             childAspectRatio: 1.2,
             children: [
               _metric('INGRESOS', formatPrice(totalIncome),
-                  Icons.trending_up_rounded, kGreen,
+                  Icons.trending_up_rounded, context.colors.green,
                   trend: '+14.2%',
                   subtitle: 'vs mes anterior',
                   chartData: const [0.4, 0.5, 0.6, 0.55, 0.7, 0.8, 0.9, 1.0]),
               _metric('EGRESOS', formatPrice(totalExpense),
-                  Icons.trending_down_rounded, kRed,
+                  Icons.trending_down_rounded, context.colors.red,
                   trend: '-3.1%',
                   subtitle: 'vs mes anterior',
                   chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5]),
               _metric('BALANCE', formatPrice(balance),
-                  Icons.account_balance_wallet_rounded, kPurple,
+                  Icons.account_balance_wallet_rounded, context.colors.purple,
                   trend: '+11.8%',
                   subtitle: 'ganancia neta',
                   chartData: const [0.3, 0.4, 0.5, 0.55, 0.65, 0.7, 0.85, 1.0]),
-              _metric('MRR', formatPrice(mrr), Icons.autorenew_rounded, kGreen,
+              _metric('MRR', formatPrice(mrr), Icons.autorenew_rounded,
+                  context.colors.green,
                   trend: '+6.8%',
                   subtitle: 'ingreso recurrente',
                   chartData: const [
@@ -5538,7 +10618,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     1.0
                   ]),
               _metric('RETENCIÓN', '${retention.toStringAsFixed(1)}%',
-                  Icons.favorite_rounded, kYellow,
+                  Icons.favorite_rounded, context.colors.yellow,
                   trend: '+2.1%',
                   subtitle: 'miembros que renuevan',
                   chartData: const [
@@ -5551,7 +10631,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     0.85,
                     0.88
                   ]),
-              _metric('LTV', formatPrice(ltv), Icons.diamond_rounded, kPurple,
+              _metric('LTV', formatPrice(ltv), Icons.diamond_rounded,
+                  context.colors.purple,
                   trend: '+8.4%',
                   subtitle: 'valor por cliente',
                   chartData: const [0.4, 0.5, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0]),
@@ -5617,8 +10698,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                     children: [
                                       Text(
                                         e.key,
-                                        style: const TextStyle(
-                                          color: kWhite,
+                                        style: TextStyle(
+                                          color: context.colors.white,
                                           fontSize: 9,
                                           fontWeight: FontWeight.w900,
                                         ),
@@ -5651,12 +10732,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             action: 'VER TODOS',
             onAction: () {},
             child: topPlans.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(24),
+                ? Padding(
+                    padding: const EdgeInsets.all(24),
                     child: Center(
                       child: Text(
                         'Aún no hay datos de ventas',
-                        style: TextStyle(color: kMuted),
+                        style: TextStyle(color: context.colors.muted),
                       ),
                     ),
                   )
@@ -5667,7 +10748,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           .reduce((a, b) => a > b ? a : b);
                       final percent =
                           maxSales == 0 ? 0.0 : (p['sales'] as int) / maxSales;
-                      final color = p['color'] as Color;
+                      final color =
+                          _planColorByIndex((p['colorIndex'] as int?) ?? 0);
 
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 14),
@@ -5680,7 +10762,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                   width: 32,
                                   height: 32,
                                   decoration: BoxDecoration(
-                                    color: color.withOpacity(.15),
+                                    color: color.withValues(alpha: .15),
                                     borderRadius: BorderRadius.circular(9),
                                   ),
                                   child: Icon(
@@ -5697,8 +10779,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                     children: [
                                       Text(
                                         p['name'].toString().toUpperCase(),
-                                        style: const TextStyle(
-                                          color: kWhite,
+                                        style: TextStyle(
+                                          color: context.colors.white,
                                           fontSize: 13,
                                           fontWeight: FontWeight.w900,
                                           letterSpacing: 0.5,
@@ -5707,8 +10789,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                       const SizedBox(height: 2),
                                       Text(
                                         '${p['sales']} ventas',
-                                        style: const TextStyle(
-                                          color: kMuted,
+                                        style: TextStyle(
+                                          color: context.colors.muted,
                                           fontSize: 11,
                                         ),
                                       ),
@@ -5731,7 +10813,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               child: LinearProgressIndicator(
                                 value: percent,
                                 minHeight: 8,
-                                backgroundColor: kPanel2,
+                                backgroundColor: context.colors.panel2,
                                 valueColor:
                                     AlwaysStoppedAnimation<Color>(color),
                               ),
@@ -5760,12 +10842,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 ),
                 const SizedBox(height: 16),
                 if (filteredTransactions.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(24),
+                  Padding(
+                    padding: const EdgeInsets.all(24),
                     child: Center(
                       child: Text(
                         'Aún no hay transacciones',
-                        style: TextStyle(color: kMuted),
+                        style: TextStyle(color: context.colors.muted),
                       ),
                     ),
                   )
@@ -5773,15 +10855,16 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   ...filteredTransactions.map((t) {
                     final isIncome = t['type'] == 'INGRESO';
                     final amount = (t['amount'] as num).toDouble();
-                    final color = isIncome ? kGreen : kRed;
+                    final color =
+                        isIncome ? context.colors.green : context.colors.red;
 
                     return Container(
                       margin: const EdgeInsets.only(bottom: 10),
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: kPanel2,
+                        color: context.colors.panel2,
                         borderRadius: BorderRadius.circular(13),
-                        border: Border.all(color: kBorder),
+                        border: Border.all(color: context.colors.border),
                       ),
                       child: Row(
                         children: [
@@ -5789,7 +10872,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             width: 42,
                             height: 42,
                             decoration: BoxDecoration(
-                              color: color.withOpacity(.12),
+                              color: color.withValues(alpha: .12),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Icon(
@@ -5807,8 +10890,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               children: [
                                 Text(
                                   t['name'].toString(),
-                                  style: const TextStyle(
-                                    color: kWhite,
+                                  style: TextStyle(
+                                    color: context.colors.white,
                                     fontSize: 13,
                                     fontWeight: FontWeight.w800,
                                   ),
@@ -5816,8 +10899,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 const SizedBox(height: 2),
                                 Text(
                                   '${t['concept']} · ${t['method']}',
-                                  style: const TextStyle(
-                                    color: kMuted,
+                                  style: TextStyle(
+                                    color: context.colors.muted,
                                     fontSize: 11,
                                   ),
                                 ),
@@ -5838,8 +10921,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               const SizedBox(height: 2),
                               Text(
                                 t['date'].toString(),
-                                style: const TextStyle(
-                                  color: kMuted,
+                                style: TextStyle(
+                                  color: context.colors.muted,
                                   fontSize: 10,
                                 ),
                               ),
@@ -5858,16 +10941,167 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
+  Widget _financePeriodChip(String value, String label) {
+    final selected = financePeriod == value;
+    return GestureDetector(
+      onTap: () => setState(() => financePeriod = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+              ? context.colors.green.withValues(alpha: .15)
+              : context.colors.panel,
+          borderRadius: BorderRadius.circular(30),
+          border: Border.all(
+            color: selected
+                ? context.colors.green.withValues(alpha: .55)
+                : context.colors.border,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? context.colors.green : context.colors.muted,
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _financeTxChip(String value, String label) {
+    final selected = transactionFilter == value;
+    return GestureDetector(
+      onTap: () => setState(() => transactionFilter = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: selected
+              ? context.colors.purple.withValues(alpha: .15)
+              : context.colors.panel,
+          borderRadius: BorderRadius.circular(30),
+          border: Border.all(
+            color: selected
+                ? context.colors.purple.withValues(alpha: .55)
+                : context.colors.border,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? context.colors.purple : context.colors.muted,
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _financeBigCard({
+    required String title,
+    required String value,
+    required String trend,
+    required Color trendColor,
+    required Color color,
+    required List<double> chartData,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: context.colors.white.withValues(alpha: .05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: trendColor.withValues(alpha: .15),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  trend,
+                  style: TextStyle(
+                    color: trendColor,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            value,
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.w900,
+              height: 1,
+              letterSpacing: -0.3,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 40,
+            width: double.infinity,
+            child: CustomPaint(
+              painter: _MiniChartPainter(data: chartData, color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Color _methodColor(String method) {
     switch (method) {
       case 'TARJETA':
-        return kPurple;
+        return context.colors.purple;
       case 'EFECTIVO':
-        return kGreen;
+        return context.colors.green;
       case 'TRANSFERENCIA':
-        return kYellow;
+        return context.colors.yellow;
       default:
-        return kRed;
+        return context.colors.red;
+    }
+  }
+
+  Color _planColorByIndex(int index) {
+    switch (index) {
+      case 0:
+        return context.colors.red;
+      case 1:
+        return context.colors.purple;
+      case 2:
+        return context.colors.yellow;
+      case 3:
+        return context.colors.green;
+      default:
+        return context.colors.red;
     }
   }
 
@@ -5876,25 +11110,25 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return Expanded(
       child: InkWell(
         borderRadius: BorderRadius.circular(13),
-        onTap: () {
-          setState(() {
-            financePeriod = label;
-          });
-        },
+        onTap: () => setState(() => financePeriod = label),
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 12),
           decoration: BoxDecoration(
-            color: selected ? kGreen.withOpacity(.15) : kPanel2,
+            color: selected
+                ? context.colors.green.withValues(alpha: .15)
+                : context.colors.panel2,
             borderRadius: BorderRadius.circular(13),
             border: Border.all(
-              color: selected ? kGreen.withOpacity(.45) : kBorder,
+              color: selected
+                  ? context.colors.green.withValues(alpha: .45)
+                  : context.colors.border,
             ),
           ),
           child: Center(
             child: Text(
               label,
               style: TextStyle(
-                color: selected ? kGreen : kMuted,
+                color: selected ? context.colors.green : context.colors.muted,
                 fontSize: 11,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0.5,
@@ -5911,25 +11145,25 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return Expanded(
       child: InkWell(
         borderRadius: BorderRadius.circular(11),
-        onTap: () {
-          setState(() {
-            transactionFilter = label;
-          });
-        },
+        onTap: () => setState(() => transactionFilter = label),
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
-            color: selected ? kPurple.withOpacity(.15) : kPanel2,
+            color: selected
+                ? context.colors.purple.withValues(alpha: .15)
+                : context.colors.panel2,
             borderRadius: BorderRadius.circular(11),
             border: Border.all(
-              color: selected ? kPurple.withOpacity(.45) : kBorder,
+              color: selected
+                  ? context.colors.purple.withValues(alpha: .45)
+                  : context.colors.border,
             ),
           ),
           child: Center(
             child: Text(
               label,
               style: TextStyle(
-                color: selected ? kPurple : kMuted,
+                color: selected ? context.colors.purple : context.colors.muted,
                 fontSize: 10,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0.5,
@@ -5952,7 +11186,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           drawVerticalLine: false,
           horizontalInterval: maxY / 5,
           getDrawingHorizontalLine: (value) => FlLine(
-            color: kBorder,
+            color: context.colors.border,
             strokeWidth: 1,
           ),
         ),
@@ -5971,7 +11205,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               getTitlesWidget: (value, meta) {
                 return Text(
                   '\$${(value / 1000).toStringAsFixed(0)}k',
-                  style: const TextStyle(color: kMuted, fontSize: 10),
+                  style: TextStyle(color: context.colors.muted, fontSize: 10),
                 );
               },
             ),
@@ -5990,8 +11224,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(
                     monthLabels[i],
-                    style: const TextStyle(
-                      color: kMuted,
+                    style: TextStyle(
+                      color: context.colors.muted,
                       fontSize: 9,
                       fontWeight: FontWeight.w800,
                     ),
@@ -6013,15 +11247,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               (i) => FlSpot(i.toDouble(), monthlyIncome[i]),
             ),
             isCurved: true,
-            gradient: const LinearGradient(
-              colors: [kGreen, kPurple],
+            gradient: LinearGradient(
+              colors: [context.colors.green, context.colors.purple],
             ),
             barWidth: 3,
             dotData: FlDotData(
               show: true,
               getDotPainter: (spot, percent, bar, index) => FlDotCirclePainter(
                 radius: 4,
-                color: kGreen,
+                color: context.colors.green,
                 strokeWidth: 2,
                 strokeColor: Colors.black,
               ),
@@ -6032,8 +11266,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  kGreen.withOpacity(.25),
-                  kGreen.withOpacity(.0),
+                  context.colors.green.withValues(alpha: .25),
+                  context.colors.green.withValues(alpha: .0),
                 ],
               ),
             ),
@@ -6059,7 +11293,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           drawVerticalLine: false,
           horizontalInterval: maxY / 4,
           getDrawingHorizontalLine: (value) => FlLine(
-            color: kBorder,
+            color: context.colors.border,
             strokeWidth: 1,
           ),
         ),
@@ -6077,7 +11311,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               interval: maxY / 4,
               getTitlesWidget: (value, meta) => Text(
                 '\$${(value / 1000).toStringAsFixed(1)}k',
-                style: const TextStyle(color: kMuted, fontSize: 10),
+                style: TextStyle(color: context.colors.muted, fontSize: 10),
               ),
             ),
           ),
@@ -6095,8 +11329,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(
                     labels[i],
-                    style: const TextStyle(
-                      color: kMuted,
+                    style: TextStyle(
+                      color: context.colors.muted,
                       fontSize: 10,
                       fontWeight: FontWeight.w800,
                     ),
@@ -6113,7 +11347,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             barRods: [
               BarChartRodData(
                 toY: weeklyIncome[i],
-                color: kGreen,
+                color: context.colors.green,
                 width: 14,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(6),
@@ -6121,7 +11355,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ),
               BarChartRodData(
                 toY: weeklyExpense[i],
-                color: kRed,
+                color: context.colors.red,
                 width: 14,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(6),
@@ -6138,10 +11372,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final total = paymentMethods.values.fold(0.0, (a, b) => a + b);
 
     if (total == 0) {
-      return const Center(
+      return Center(
         child: Text(
           'Sin datos',
-          style: TextStyle(color: kMuted, fontSize: 12),
+          style: TextStyle(color: context.colors.muted, fontSize: 12),
         ),
       );
     }
@@ -6171,385 +11405,27 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // CLIENTES
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _clientsPage() {
-    final query = searchController.text.toLowerCase();
-
-    var filtered = members.where((m) {
-      return m['name'].toString().toLowerCase().contains(query) ||
-          m['phone'].toString().toLowerCase().contains(query);
-    }).toList();
-
-    if (clientFilter != 'TODOS') {
-      filtered = filtered.where((m) {
-        if (clientFilter == 'ACTIVOS') return m['status'] == 'ACTIVO';
-        if (clientFilter == 'POR VENCER') return m['status'] == 'POR VENCER';
-        if (clientFilter == 'VENCIDOS') return m['status'] == 'VENCIDO';
-        return true;
-      }).toList();
-    }
-
-    final total = members.length;
-    final totalActivos = members.where((m) => m['status'] == 'ACTIVO').length;
-    final totalPorVencer =
-        members.where((m) => m['status'] == 'POR VENCER').length;
-    final totalVencidos = members.where((m) => m['status'] == 'VENCIDO').length;
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'CLIENTES',
-                      style: TextStyle(
-                        color: kWhite,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    SizedBox(height: 6),
-                    Text(
-                      'Gestión completa de tus clientes',
-                      style: TextStyle(
-                        color: kMuted,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              ElevatedButton.icon(
-                onPressed: addMember,
-                icon: const Icon(Icons.add_rounded, size: 20),
-                label: const Text(
-                  'NUEVO CLIENTE',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 12,
-                  ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kRed,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          GridView.count(
-            crossAxisCount: 4,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            childAspectRatio: 0.95,
-            children: [
-              _metric('TOTAL CLIENTES', total.toString(),
-                  Icons.people_alt_rounded, kPurple,
-                  trend: '+12',
-                  subtitle: 'todos',
-                  chartData: const [
-                    0.4,
-                    0.5,
-                    0.55,
-                    0.6,
-                    0.65,
-                    0.75,
-                    0.85,
-                    1.0
-                  ]),
-              _metric('ACTIVOS', totalActivos.toString(),
-                  Icons.check_circle_rounded, kGreen,
-                  trend: '+8.4%',
-                  subtitle: 'al día',
-                  chartData: const [
-                    0.5,
-                    0.55,
-                    0.6,
-                    0.58,
-                    0.7,
-                    0.75,
-                    0.85,
-                    1.0
-                  ]),
-              _metric('POR VENCER', totalPorVencer.toString(),
-                  Icons.warning_amber_rounded, kYellow,
-                  trend: '+3.2%',
-                  subtitle: 'próximos 7 días',
-                  chartData: const [0.3, 0.4, 0.35, 0.5, 0.45, 0.55, 0.5, 0.6]),
-              _metric('VENCIDOS', totalVencidos.toString(), Icons.block_rounded,
-                  kRed,
-                  trend: '-1.1%',
-                  subtitle: 'requieren renovar',
-                  chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5]),
-            ],
-          ),
-          const SizedBox(height: 24),
-          _card(
-            title: 'BUSCAR Y FILTRAR',
-            child: Column(
-              children: [
-                TextField(
-                  controller: searchController,
-                  onChanged: (_) => setState(() {}),
-                  style: const TextStyle(color: kWhite),
-                  decoration: _inputDecoration(
-                    'Buscar por nombre o teléfono',
-                    prefixIcon: Icons.search_rounded,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    _filterChip('TODOS'),
-                    const SizedBox(width: 8),
-                    _filterChip('ACTIVOS'),
-                    const SizedBox(width: 8),
-                    _filterChip('POR VENCER'),
-                    const SizedBox(width: 8),
-                    _filterChip('VENCIDOS'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          if (filtered.isEmpty)
-            _card(
-              title: 'SIN RESULTADOS',
-              child: const Padding(
-                padding: EdgeInsets.all(30),
-                child: Center(
-                  child: Text(
-                    'No se encontraron clientes con esos filtros.',
-                    style: TextStyle(color: kMuted),
-                  ),
-                ),
-              ),
-            )
-          else
-            ...filtered.map((m) => Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: _clientRow(m),
-                )),
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChip(String label) {
-    final selected = clientFilter == label;
-    return Expanded(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(13),
-        onTap: () {
-          setState(() {
-            clientFilter = label;
-          });
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: selected ? kRed.withOpacity(.15) : kPanel2,
-            borderRadius: BorderRadius.circular(13),
-            border: Border.all(
-              color: selected ? kRed.withOpacity(.45) : kBorder,
-            ),
-          ),
-          child: Center(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: selected ? kRed : kMuted,
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _clientRow(Map<String, dynamic> m) {
-    final status = m['status'].toString();
-
-    Color color = kGreen;
-
-    if (status == 'POR VENCER') {
-      color = kYellow;
-    }
-
-    if (status == 'VENCIDO') {
-      color = kRed;
-    }
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(18),
-      onTap: () => showClientDetail(m),
-      child: Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: kBorder),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 54,
-              height: 54,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [color, color.withOpacity(.5)],
-                ),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                m['name'].toString().isEmpty
-                    ? '?'
-                    : m['name'].toString().substring(0, 1).toUpperCase(),
-                style: const TextStyle(
-                  color: Colors.black,
-                  fontSize: 22,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        m['name'].toString(),
-                        style: const TextStyle(
-                          color: kWhite,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      _statusChip(status, color),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${m['phone']} · ${m['plan']} · vence ${m['expiry']}',
-                    style: const TextStyle(
-                      color: kMuted,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Pagos: ${m['payments']} · Total: ${formatPrice((m['totalPaid'] as num).toDouble())}',
-                    style: const TextStyle(
-                      color: kGreen,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              onPressed: () => editMember(m),
-              icon: const Icon(
-                Icons.edit_rounded,
-                color: kYellow,
-                size: 20,
-              ),
-              tooltip: 'Editar',
-            ),
-            IconButton(
-              onPressed: () => deleteMember(m),
-              icon: const Icon(
-                Icons.delete_rounded,
-                color: kRed,
-                size: 20,
-              ),
-              tooltip: 'Eliminar',
-            ),
-            IconButton(
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      'Notificando a ${m['name']} por WhatsApp...',
-                    ),
-                  ),
-                );
-              },
-              icon: const FaIcon(
-                FontAwesomeIcons.whatsapp,
-                color: kGreen,
-                size: 20,
-              ),
-              tooltip: 'WhatsApp',
-            ),
-            IconButton(
-              onPressed: () => showClientDetail(m),
-              icon: const Icon(
-                Icons.arrow_forward_ios_rounded,
-                color: kMuted,
-                size: 16,
-              ),
-              tooltip: 'Ver detalle',
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
   // MONEDAS
   // ═══════════════════════════════════════════════════════════
-
   Widget _currencyPage() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'CONFIGURACIÓN DE MONEDAS',
             style: TextStyle(
-              color: kWhite,
+              color: context.colors.white,
               fontSize: 28,
               fontWeight: FontWeight.w900,
               letterSpacing: 1,
             ),
           ),
           const SizedBox(height: 6),
-          const Text(
+          Text(
             'Cada moneda tiene su tasa hacia Bolívares.',
-            style: TextStyle(
-              color: kMuted,
-              fontSize: 13,
-            ),
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
           ),
           const SizedBox(height: 26),
           _card(
@@ -6561,18 +11437,18 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   padding: const EdgeInsets.only(bottom: 8),
                   child: InkWell(
                     borderRadius: BorderRadius.circular(13),
-                    onTap: () {
-                      setState(() {
-                        selectedCurrency = c['code']!;
-                      });
-                    },
+                    onTap: () => setState(() => selectedCurrency = c['code']!),
                     child: Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: isSelected ? kGreen.withOpacity(.13) : kPanel2,
+                        color: isSelected
+                            ? context.colors.green.withValues(alpha: .13)
+                            : context.colors.panel2,
                         borderRadius: BorderRadius.circular(13),
                         border: Border.all(
-                          color: isSelected ? kGreen.withOpacity(.45) : kBorder,
+                          color: isSelected
+                              ? context.colors.green.withValues(alpha: .45)
+                              : context.colors.border,
                         ),
                       ),
                       child: Row(
@@ -6581,14 +11457,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             width: 44,
                             height: 44,
                             decoration: BoxDecoration(
-                              color: kGreen.withOpacity(.12),
+                              color:
+                                  context.colors.green.withValues(alpha: .12),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Center(
                               child: Text(
                                 c['symbol']!,
-                                style: const TextStyle(
-                                  color: kGreen,
+                                style: TextStyle(
+                                  color: context.colors.green,
                                   fontWeight: FontWeight.w900,
                                   fontSize: 17,
                                 ),
@@ -6602,8 +11479,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               children: [
                                 Text(
                                   c['code']!,
-                                  style: const TextStyle(
-                                    color: kWhite,
+                                  style: TextStyle(
+                                    color: context.colors.white,
                                     fontWeight: FontWeight.w900,
                                     fontSize: 15,
                                   ),
@@ -6611,8 +11488,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 const SizedBox(height: 2),
                                 Text(
                                   c['name']!,
-                                  style: const TextStyle(
-                                    color: kMuted,
+                                  style: TextStyle(
+                                    color: context.colors.muted,
                                     fontSize: 12,
                                   ),
                                 ),
@@ -6620,9 +11497,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             ),
                           ),
                           if (isSelected)
-                            const Icon(
+                            Icon(
                               Icons.check_circle_rounded,
-                              color: kGreen,
+                              color: context.colors.green,
                               size: 24,
                             ),
                         ],
@@ -6639,10 +11516,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             child: Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: showConversion ? kGreen.withOpacity(.10) : kPanel2,
+                color: showConversion
+                    ? context.colors.green.withValues(alpha: .10)
+                    : context.colors.panel2,
                 borderRadius: BorderRadius.circular(13),
                 border: Border.all(
-                  color: showConversion ? kGreen.withOpacity(.35) : kBorder,
+                  color: showConversion
+                      ? context.colors.green.withValues(alpha: .35)
+                      : context.colors.border,
                 ),
               ),
               child: Row(
@@ -6651,7 +11532,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     showConversion
                         ? Icons.visibility_rounded
                         : Icons.visibility_off_rounded,
-                    color: showConversion ? kGreen : kMuted,
+                    color: showConversion
+                        ? context.colors.green
+                        : context.colors.muted,
                     size: 24,
                   ),
                   const SizedBox(width: 14),
@@ -6664,7 +11547,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               ? 'Conversión ACTIVADA'
                               : 'Conversión DESACTIVADA',
                           style: TextStyle(
-                            color: showConversion ? kGreen : kWhite,
+                            color: showConversion
+                                ? context.colors.green
+                                : context.colors.white,
                             fontWeight: FontWeight.w900,
                             fontSize: 13,
                           ),
@@ -6674,8 +11559,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           showConversion
                               ? 'Muestra el precio en bolívares debajo del principal'
                               : 'Solo se muestra la moneda principal',
-                          style: const TextStyle(
-                            color: kMuted,
+                          style: TextStyle(
+                            color: context.colors.muted,
                             fontSize: 11,
                           ),
                         ),
@@ -6684,12 +11569,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   ),
                   Switch(
                     value: showConversion,
-                    activeColor: kGreen,
-                    onChanged: (value) {
-                      setState(() {
-                        showConversion = value;
-                      });
-                    },
+                    activeColor: context.colors.green,
+                    onChanged: (value) =>
+                        setState(() => showConversion = value),
                   ),
                 ],
               ),
@@ -6701,9 +11583,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             child: Container(
               padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
-                color: kPanel2,
+                color: context.colors.panel2,
                 borderRadius: BorderRadius.circular(15),
-                border: Border.all(color: kBorder),
+                border: Border.all(color: context.colors.border),
               ),
               child: Row(
                 children: [
@@ -6711,7 +11593,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     width: 8,
                     height: 55,
                     decoration: BoxDecoration(
-                      color: kPurple,
+                      color: context.colors.purple,
                       borderRadius: BorderRadius.circular(5),
                     ),
                   ),
@@ -6720,27 +11602,27 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
+                        Text(
                           'Premium',
                           style: TextStyle(
-                            color: kWhite,
+                            color: context.colors.white,
                             fontWeight: FontWeight.w900,
                             fontSize: 15,
                           ),
                         ),
                         const SizedBox(height: 4),
-                        const Text(
+                        Text(
                           '30 días · ILIMITADO',
                           style: TextStyle(
-                            color: kMuted,
+                            color: context.colors.muted,
                             fontSize: 11,
                           ),
                         ),
                         const SizedBox(height: 8),
                         Text(
                           formatPrice(49.99),
-                          style: const TextStyle(
-                            color: kYellow,
+                          style: TextStyle(
+                            color: context.colors.yellow,
                             fontWeight: FontWeight.w900,
                             fontSize: 22,
                           ),
@@ -6748,8 +11630,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         if (showConversion)
                           Text(
                             formatPriceSecondary(49.99),
-                            style: const TextStyle(
-                              color: kMuted,
+                            style: TextStyle(
+                              color: context.colors.muted,
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
                             ),
@@ -6767,42 +11649,27 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Cuantos Bolívares vale 1 unidad',
-                  style: TextStyle(
-                    color: kMuted,
-                    fontSize: 11,
-                  ),
+                  style: TextStyle(color: context.colors.muted, fontSize: 11),
                 ),
                 const SizedBox(height: 14),
                 _rateField(
                   label: '1 USD = ? Bs (Bolívares)',
                   value: usdToVes,
-                  onChanged: (v) {
-                    setState(() {
-                      usdToVes = v;
-                    });
-                  },
+                  onChanged: (v) => setState(() => usdToVes = v),
                 ),
                 const SizedBox(height: 10),
                 _rateField(
                   label: '1 EUR = ? Bs (Bolívares)',
                   value: eurToVes,
-                  onChanged: (v) {
-                    setState(() {
-                      eurToVes = v;
-                    });
-                  },
+                  onChanged: (v) => setState(() => eurToVes = v),
                 ),
                 const SizedBox(height: 10),
                 _rateField(
                   label: '1 COP = ? Bs (Bolívares)',
                   value: copToVes,
-                  onChanged: (v) {
-                    setState(() {
-                      copToVes = v;
-                    });
-                  },
+                  onChanged: (v) => setState(() => copToVes = v),
                 ),
               ],
             ),
@@ -6810,12 +11677,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 20),
           _button(
             'LISTO',
-            kGreen,
+            context.colors.green,
             () {
-              setState(() {
-                _section = 0;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
+              setState(() => _section = 0);
+              final ctx = context;
+              ScaffoldMessenger.of(ctx).showSnackBar(
                 const SnackBar(
                   content: Text('Configuración guardada'),
                 ),
@@ -6839,22 +11705,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return TextField(
       controller: controller,
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      style: const TextStyle(color: kWhite),
+      style: TextStyle(color: context.colors.white),
       onChanged: (text) {
         final v = double.tryParse(text.replaceAll(',', '.'));
         if (v != null && v > 0) {
           onChanged(v);
         }
       },
-      decoration: _inputDecoration(label),
+      decoration: _inputDecoration(context, label),
     );
   }
 
   // ═══════════════════════════════════════════════════════════
-  // QR CENTER
+  // ALERTAS
   // ═══════════════════════════════════════════════════════════
+  Widget _alertsPage() {
+    final filtered = filteredAlerts(context);
 
-  Widget _qrCenter() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -6862,2554 +11729,457 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'ACCESO QR',
+                      'ALERTAS',
                       style: TextStyle(
-                        color: kWhite,
+                        color: context.colors.white,
                         fontSize: 28,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 1,
                       ),
                     ),
-                    SizedBox(height: 6),
+                    const SizedBox(height: 6),
                     Text(
-                      'Genera y administra el codigo de acceso del gimnasio',
-                      style: TextStyle(
-                        color: kMuted,
-                        fontSize: 13,
-                      ),
+                      'Centro de notificaciones del gimnasio',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 13),
                     ),
                   ],
                 ),
               ),
-              ElevatedButton.icon(
-                onPressed: generateGymQr,
-                icon: const Icon(Icons.refresh_rounded, size: 20),
-                label: const Text(
-                  'REGENERAR QR',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 12,
-                  ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kGreen,
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 2,
-                child: _card(
-                  title: 'QR DEL GIMNASIO',
-                  child: Column(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: kGreen.withOpacity(.15),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: kGreen.withOpacity(.35),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: const BoxDecoration(
-                                color: kGreen,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              qrTimeLeft,
-                              style: const TextStyle(
-                                color: kGreen,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w900,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Screenshot(
-                        controller: _qrScreenshotController,
-                        child: Container(
-                          padding: const EdgeInsets.all(22),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(24),
-                            boxShadow: [
-                              BoxShadow(
-                                color: kGreen.withOpacity(.20),
-                                blurRadius: 30,
-                              ),
-                            ],
-                          ),
-                          child: QrImageView(
-                            data:
-                                qrToken.isEmpty ? 'SYNTH-GYM-LOADING' : qrToken,
-                            size: 260,
-                            backgroundColor: Colors.white,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: kPanel2,
-                          borderRadius: BorderRadius.circular(13),
-                          border: Border.all(color: kBorder),
-                        ),
-                        child: Column(
-                          children: [
-                            const Text(
-                              'CODIGO DEL DIA',
-                              style: TextStyle(
-                                color: kMuted,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              qrToken.isEmpty ? 'Generando...' : qrToken,
-                              style: const TextStyle(
-                                color: kWhite,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: downloadQrAsPng,
-                              icon: const Icon(
-                                Icons.download_rounded,
-                                size: 18,
-                              ),
-                              label: const Text(
-                                'DESCARGAR PNG',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 11,
-                                ),
-                              ),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: kWhite,
-                                side: const BorderSide(color: kBorder),
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(13),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: shareQrPng,
-                              icon: const Icon(
-                                Icons.share_rounded,
-                                size: 18,
-                              ),
-                              label: const Text(
-                                'COMPARTIR',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 11,
-                                ),
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: kPurple,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 14,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(13),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 20),
-              Expanded(
-                flex: 1,
-                child: Column(
-                  children: [
-                    _card(
-                      title: 'MODO DE RENOVACION',
-                      child: Column(
-                        children: [
-                          _modeOption(
-                            'DIARIO',
-                            'Se regenera cada dia',
-                            Icons.calendar_today_rounded,
-                            kYellow,
-                          ),
-                          const SizedBox(height: 8),
-                          _modeOption(
-                            'SEMANAL',
-                            'Se regenera cada semana',
-                            Icons.date_range_rounded,
-                            kPurple,
-                          ),
-                          const SizedBox(height: 8),
-                          _modeOption(
-                            'FIJO',
-                            'No se regenera',
-                            Icons.lock_rounded,
-                            kGreen,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    _card(
-                      title: 'INFO',
-                      child: Column(
-                        children: [
-                          _infoRow('Modo actual', qrMode),
-                          const SizedBox(height: 8),
-                          _infoRow(
-                            'Generado',
-                            '${qrGenerated.hour.toString().padLeft(2, '0')}:${qrGenerated.minute.toString().padLeft(2, '0')}',
-                          ),
-                          const SizedBox(height: 8),
-                          _infoRow(
-                            'Expira',
-                            qrMode == 'FIJO'
-                                ? 'Nunca'
-                                : '${qrExpires.day}/${qrExpires.month}',
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: _accessStat(
-                  'DENTRO AHORA',
-                  inside.toString(),
-                  kGreen,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _accessStat(
-                  'ENTRADAS HOY',
-                  activities
-                      .where((a) => a['type'] == 'ENTRADA')
-                      .length
-                      .toString(),
-                  kPurple,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _accessStat(
-                  'BLOQUEADOS',
-                  activities
-                      .where((a) => a['type'] == 'BLOQUEADO')
-                      .length
-                      .toString(),
-                  kRed,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _accessStat(
-                  'SALIDAS',
-                  activities
-                      .where((a) => a['type'] == 'SALIDA')
-                      .length
-                      .toString(),
-                  kYellow,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          _card(
-            title: 'ACTIVIDAD DE ACCESO EN VIVO',
-            action: 'VER TODO',
-            onAction: showActivity,
-            child: activities.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Center(
-                      child: Text(
-                        'Sin accesos registrados',
-                        style: TextStyle(color: kMuted),
-                      ),
-                    ),
-                  )
-                : Column(
-                    children: activities.take(8).map((log) {
-                      final authorized = log['type'] != 'BLOQUEADO';
-                      final color = authorized ? kGreen : kRed;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: kPanel2,
-                          borderRadius: BorderRadius.circular(13),
-                          border: Border.all(color: color.withOpacity(.20)),
-                        ),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 42,
-                              height: 42,
-                              decoration: BoxDecoration(
-                                color: color.withOpacity(.12),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Icon(
-                                authorized
-                                    ? Icons.check_circle_rounded
-                                    : Icons.block_rounded,
-                                color: color,
-                                size: 22,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    log['name'].toString(),
-                                    style: const TextStyle(
-                                      color: kWhite,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    log['type'].toString(),
-                                    style: TextStyle(
-                                      color: authorized ? kMuted : color,
-                                      fontSize: 11,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Text(
-                              log['time'].toString(),
-                              style: const TextStyle(
-                                color: kMuted,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  ),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: _button(
-                  'ESCANEAR CLIENTE',
-                  kRed,
-                  showAccessScanner,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _button(
-                  'REGISTRAR SALIDA',
-                  kYellow,
-                  registerExit,
-                  darkText: true,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _modeOption(
-    String mode,
-    String description,
-    IconData icon,
-    Color color,
-  ) {
-    final isSelected = qrMode == mode;
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(13),
-      onTap: () {
-        setState(() {
-          qrMode = mode;
-        });
-        generateGymQr();
-      },
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: isSelected ? color.withOpacity(.15) : kPanel2,
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(
-            color: isSelected ? color.withOpacity(.45) : kBorder,
-          ),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: color.withOpacity(.12),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: color, size: 18),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    mode,
-                    style: TextStyle(
-                      color: isSelected ? kWhite : kMuted,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    description,
-                    style: const TextStyle(
-                      color: kMuted,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (isSelected)
-              Icon(
-                Icons.check_circle_rounded,
-                color: color,
-                size: 20,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _infoRow(String label, String value) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            label,
-            style: const TextStyle(
-              color: kMuted,
-              fontSize: 11,
-            ),
-          ),
-        ),
-        Text(
-          value,
-          style: const TextStyle(
-            color: kWhite,
-            fontSize: 11,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // PLANES
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _plansPage() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'PLANES Y MEMBRESÍAS',
-                      style: TextStyle(
-                        color: kWhite,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    SizedBox(height: 6),
-                    Text(
-                      'Administra los planes disponibles del gimnasio',
-                      style: TextStyle(
-                        color: kMuted,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              ElevatedButton.icon(
-                onPressed: addPlan,
-                icon: const Icon(Icons.add_rounded, size: 20),
-                label: const Text(
-                  'NUEVO PLAN',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 12,
-                  ),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPurple,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 16,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 28),
-          if (plans.isEmpty)
-            _card(
-              title: 'SIN PLANES',
-              child: const Padding(
-                padding: EdgeInsets.all(40),
-                child: Center(
-                  child: Text(
-                    'Crea tu primer plan con el botón NUEVO PLAN',
-                    style: TextStyle(color: kMuted),
-                  ),
-                ),
-              ),
-            )
-          else
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 20,
-                mainAxisSpacing: 20,
-                childAspectRatio: 0.72,
-              ),
-              itemCount: plans.length,
-              itemBuilder: (context, index) {
-                final p = plans[index];
-                final price = (p['price'] as num).toDouble();
-                final name = p['name'].toString();
-
-                Color planColor = kPurple;
-                IconData planIcon = Icons.card_membership_rounded;
-                String? badgeText;
-
-                if (name.toLowerCase().contains('basic')) {
-                  planColor = kYellow;
-                  planIcon = Icons.star_border_rounded;
-                } else if (name.toLowerCase().contains('premium')) {
-                  planColor = kRed;
-                  planIcon = Icons.workspace_premium_rounded;
-                  badgeText = 'MÁS POPULAR';
-                } else if (name.toLowerCase().contains('elite')) {
-                  planColor = kPurple;
-                  planIcon = Icons.diamond_rounded;
-                } else if (name.toLowerCase().contains('10')) {
-                  planColor = kGreen;
-                  planIcon = Icons.timer_rounded;
-                }
-
-                return _planCardPro(
-                  plan: p,
-                  price: price,
-                  name: name,
-                  planColor: planColor,
-                  planIcon: planIcon,
-                  badgeText: badgeText,
-                );
-              },
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _planCardPro({
-    required Map<String, dynamic> plan,
-    required double price,
-    required String name,
-    required Color planColor,
-    required IconData planIcon,
-    String? badgeText,
-  }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: planColor.withOpacity(.35),
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: planColor.withOpacity(.08),
-            blurRadius: 30,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: planColor.withOpacity(.15),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: planColor.withOpacity(.35),
-                        ),
-                      ),
-                      child: Icon(
-                        planIcon,
-                        color: planColor,
-                        size: 26,
-                      ),
-                    ),
-                    const Spacer(),
-                    PopupMenuButton<String>(
-                      icon: const Icon(
-                        Icons.more_vert_rounded,
-                        color: kMuted,
-                        size: 20,
-                      ),
-                      color: kPanel2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: const BorderSide(color: kBorder),
-                      ),
-                      onSelected: (value) {
-                        if (value == 'edit') {
-                          editPlan(plan);
-                        } else if (value == 'delete') {
-                          deletePlan(plan);
-                        } else if (value == 'share') {
-                          sharePlan(plan, price);
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        const PopupMenuItem<String>(
-                          value: 'edit',
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.edit_rounded,
-                                color: kYellow,
-                                size: 18,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Editar',
-                                style: TextStyle(color: kWhite),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const PopupMenuItem<String>(
-                          value: 'delete',
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.delete_rounded,
-                                color: kRed,
-                                size: 18,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Eliminar',
-                                style: TextStyle(color: kWhite),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  name.toUpperCase(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  formatPrice(price),
-                  style: TextStyle(
-                    color: planColor,
-                    fontSize: 42,
-                    fontWeight: FontWeight.w900,
-                    height: 1.0,
-                  ),
-                ),
-                if (showConversion) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    formatPriceSecondary(price),
-                    style: const TextStyle(
-                      color: kMuted,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 20),
-                Container(
-                  height: 1,
-                  color: Colors.white.withOpacity(.06),
-                ),
-                const SizedBox(height: 16),
-                _featureItem(
-                  '${plan['days']} días de vigencia',
-                  true,
-                  planColor,
-                ),
-                const SizedBox(height: 10),
-                _featureItem(
-                  plan['access'].toString(),
-                  true,
-                  planColor,
-                ),
-                const SizedBox(height: 10),
-                _featureItem(
-                  'Acceso a todas las áreas',
-                  true,
-                  planColor,
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () => sharePlan(plan, price),
-                    icon: const Icon(Icons.share_rounded, size: 18),
-                    label: const Text(
-                      'COMPARTIR PLAN',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 12,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: planColor,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (badgeText != null)
-            Positioned(
-              top: 16,
-              right: 60,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: planColor,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: planColor.withOpacity(.4),
-                      blurRadius: 15,
-                    ),
-                  ],
-                ),
-                child: Text(
-                  badgeText,
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _featureItem(String text, bool included, Color color) {
-    return Row(
-      children: [
-        Container(
-          width: 22,
-          height: 22,
-          decoration: BoxDecoration(
-            color: included ? color.withOpacity(.15) : kPanel2,
-            borderRadius: BorderRadius.circular(7),
-          ),
-          child: Icon(
-            included ? Icons.check_rounded : Icons.close_rounded,
-            color: included ? color : kMuted,
-            size: 14,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            text,
-            style: TextStyle(
-              color: included ? kWhite : kMuted,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // MÓDULO VACÍO
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _modulePage() {
-    final titles = [
-      'COMMAND CENTER',
-      'CLIENTES',
-      'ACCESO QR',
-      'MEMBRESÍAS',
-      'FINANZAS',
-      'ENTRENAMIENTO',
-      'ANALYTICS',
-      'ALERTAS',
-      'MONEDAS',
-    ];
-
-    return Center(
-      child: Container(
-        width: 620,
-        padding: const EdgeInsets.all(35),
-        decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: kBorder),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              [
-                Icons.grid_view_rounded,
-                Icons.people_alt_rounded,
-                Icons.qr_code_scanner_rounded,
-                Icons.card_membership_rounded,
-                Icons.payments_rounded,
-                Icons.fitness_center_rounded,
-                Icons.analytics_rounded,
-                Icons.notifications_active_rounded,
-                Icons.currency_exchange_rounded,
-              ][_section],
-              color: kRed,
-              size: 60,
-            ),
-            const SizedBox(height: 18),
-            Text(
-              titles[_section],
-              style: const TextStyle(
-                color: kWhite,
-                fontSize: 27,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'Módulo preparado para continuar el desarrollo del sistema.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: kMuted,
-                fontSize: 14,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // MOBILE
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _mobile() {
-    return SafeArea(
-      child: Column(
-        children: [
-          // HEADER MÓVIL CON BOTÓN HAMBURGUESA
-          Container(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            decoration: const BoxDecoration(
-              color: kBg,
-              border: Border(
-                bottom: BorderSide(color: kBorder),
-              ),
-            ),
-            child: Row(
-              children: [
-                // Botón hamburguesa (abre el drawer)
-                InkWell(
-                  borderRadius: BorderRadius.circular(12),
-                  onTap: () => _scaffoldKey.currentState?.openDrawer(),
-                  child: Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: kPanel,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: kBorder),
-                    ),
-                    child: const Icon(
-                      Icons.menu_rounded,
-                      color: kWhite,
-                      size: 22,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: kRed,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.bolt_rounded,
-                    color: Colors.black,
-                  ),
-                ),
-                const SizedBox(width: 11),
-                const Expanded(
-                  child: Text(
-                    'SYNTHETIX GYM OS',
-                    style: TextStyle(
-                      color: kWhite,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1,
-                      fontSize: 13,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => loadAllData(),
-                  icon: const Icon(
-                    Icons.refresh_rounded,
-                    color: kGreen,
-                  ),
-                ),
-                IconButton(
-                  onPressed: showNotifications,
-                  icon: const Icon(
-                    Icons.notifications_none_rounded,
-                    color: kWhite,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // CONTENIDO (con todos los cases, INCLUYENDO ENTRENAMIENTO)
-          Expanded(
-            child: loadingData
-                ? const Center(
-                    child: CircularProgressIndicator(color: kGreen),
-                  )
-                : _mobileContent(),
-          ),
-
-          // NAV INFERIOR
-          _mobileNav(),
-        ],
-      ),
-    );
-  }
-
-  // Router del contenido móvil — ¡AQUÍ ESTÁ EL FIX!
-  Widget _mobileContent() {
-    switch (_section) {
-      case 0:
-        return SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              _heroMobile(),
-              const SizedBox(height: 15),
-              Row(
-                children: [
-                  Expanded(
-                    child: _quickAction(
-                      Icons.person_add_alt_1_rounded,
-                      'MIEMBRO',
-                      kRed,
-                      addMember,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _quickAction(
-                      Icons.payments_rounded,
-                      'PAGO',
-                      kYellow,
-                      newPayment,
-                      darkText: true,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 15),
-              _metricsMobile(),
-              const SizedBox(height: 15),
-              _activityCard(),
-              const SizedBox(height: 15),
-              _plansCard(),
-              const SizedBox(height: 15),
-              _membersCard(),
-            ],
-          ),
-        );
-      case 1:
-        return _clientsPage();
-      case 2:
-        return _qrCenterMobile();
-      case 3:
-        return _plansPageMobile();
-      case 4:
-        return _financePage();
-      case 5:
-        return _trainingPageMobile();
-      case 6:
-      case 7:
-        return _modulePage();
-      case 8:
-        return _currencyPage();
-      default:
-        return _modulePage();
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // TRAINING PAGE MÓVIL
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _trainingPageMobile() {
-    final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'HORARIO'];
-
-    return Column(
-      children: [
-        // Header con tabs horizontales scrollables
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: const BoxDecoration(
-            color: kBg,
-            border: Border(bottom: BorderSide(color: kBorder)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'ENTRENAMIENTO',
-                style: TextStyle(
-                  color: kWhite,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.2,
-                ),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'Rutinas · Ejercicios · Entrenadores · Horario',
-                style: TextStyle(color: kMuted, fontSize: 11),
-              ),
-              const SizedBox(height: 14),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: List.generate(tabs.length, (i) {
-                    final active = trainingTab == i;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(11),
-                        onTap: () => setState(() => trainingTab = i),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 10,
-                          ),
-                          decoration: BoxDecoration(
-                            color: active ? kPurple.withOpacity(.15) : kPanel,
-                            borderRadius: BorderRadius.circular(11),
-                            border: Border.all(
-                              color:
-                                  active ? kPurple.withOpacity(.45) : kBorder,
-                            ),
-                          ),
-                          child: Text(
-                            tabs[i],
-                            style: TextStyle(
-                              color: active ? kPurple : kMuted,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1,
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: _trainingContentMobile(),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _trainingContentMobile() {
-    switch (trainingTab) {
-      case 0:
-        return _routinesTabMobile();
-      case 1:
-        return _exercisesTabMobile();
-      case 2:
-        return _trainersTabMobile();
-      case 3:
-        return _scheduleTabMobile();
-      default:
-        return _routinesTabMobile();
-    }
-  }
-
-  Widget _routinesTabMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'RUTINAS DISPONIBLES',
-                style: TextStyle(
-                  color: kWhite,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1,
-                ),
-              ),
-            ),
-            ElevatedButton.icon(
-              onPressed: addRoutine,
-              icon: const Icon(Icons.add_rounded, size: 16),
-              label: const Text(
-                'NUEVA',
-                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 10),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kRed,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        if (routines.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
-            child: Center(
-              child: Text(
-                'Sin rutinas creadas',
-                style: TextStyle(color: kMuted),
-              ),
-            ),
-          )
-        else
-          ...routines.map((r) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _routineCardMobile(r),
-              )),
-      ],
-    );
-  }
-
-  Widget _routineCardMobile(Map<String, dynamic> routine) {
-    final level = routine['level'].toString();
-    final levelColor = level == 'Principiante'
-        ? kGreen
-        : level == 'Intermedio'
-            ? kYellow
-            : kRed;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorder),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  routine['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ),
-              PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert_rounded,
-                    color: kMuted, size: 20),
-                color: kPanel2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  side: const BorderSide(color: kBorder),
-                ),
-                onSelected: (value) {
-                  if (value == 'edit') editRoutine(routine);
-                  if (value == 'delete') deleteRoutine(routine);
-                },
-                itemBuilder: (_) => const [
-                  PopupMenuItem(
-                    value: 'edit',
-                    child: Row(
-                      children: [
-                        Icon(Icons.edit_rounded, color: kYellow, size: 16),
-                        SizedBox(width: 10),
-                        Text('Editar', style: TextStyle(color: kWhite)),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'delete',
-                    child: Row(
-                      children: [
-                        Icon(Icons.delete_rounded, color: kRed, size: 16),
-                        SizedBox(width: 10),
-                        Text('Eliminar', style: TextStyle(color: kWhite)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          _statusChip(level, levelColor),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              _miniStat(Icons.timer_rounded, '${routine['duration']} min'),
-              const SizedBox(width: 16),
-              _miniStat(
-                  Icons.fitness_center_rounded, '${routine['exercises']} ej'),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  routine['equipment'].toString(),
-                  style: const TextStyle(color: kMuted, fontSize: 11),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(
-                '${routine['assigned']} asignados',
-                style: const TextStyle(
-                  color: kPurple,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _exercisesTabMobile() {
-    final muscles = [
-      'TODOS',
-      'Pecho',
-      'Espalda',
-      'Piernas',
-      'Hombros',
-      'Brazos',
-      'Core'
-    ];
-
-    final filtered = exerciseFilter == 'TODOS'
-        ? exercises
-        : exercises.where((e) => e['muscle'] == exerciseFilter).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'EJERCICIOS',
-                style: TextStyle(
-                  color: kWhite,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1,
-                ),
-              ),
-            ),
-            ElevatedButton.icon(
-              onPressed: addExercise,
-              icon: const Icon(Icons.add_rounded, size: 16),
-              label: const Text(
-                'NUEVO',
-                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 10),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kPurple,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: muscles.map((m) {
-              final active = exerciseFilter == m;
-              return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(11),
-                  onTap: () => setState(() => exerciseFilter = m),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: active ? kPurple.withOpacity(.15) : kPanel,
-                      borderRadius: BorderRadius.circular(11),
-                      border: Border.all(
-                        color: active ? kPurple.withOpacity(.45) : kBorder,
-                      ),
-                    ),
-                    child: Text(
-                      m.toUpperCase(),
-                      style: TextStyle(
-                        color: active ? kPurple : kMuted,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-        const SizedBox(height: 14),
-        if (filtered.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
-            child: Center(
-              child: Text(
-                'Sin ejercicios para este filtro',
-                style: TextStyle(color: kMuted),
-              ),
-            ),
-          )
-        else
-          ...filtered.map((e) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _exerciseRowMobile(e),
-              )),
-      ],
-    );
-  }
-
-  Widget _exerciseRowMobile(Map<String, dynamic> exercise) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: kBorder),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: kPurple.withOpacity(0.12),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(
-              Icons.fitness_center_rounded,
-              color: kPurple,
-              size: 18,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  exercise['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                Text(
-                  '${exercise['muscle']} · ${exercise['sets']}x${exercise['reps']} · ${exercise['weight']}kg',
-                  style: const TextStyle(color: kMuted, fontSize: 10),
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            onPressed: () => editExercise(exercise),
-            icon: const Icon(Icons.edit_rounded, color: kYellow, size: 18),
-          ),
-          IconButton(
-            onPressed: () => deleteExercise(exercise),
-            icon: const Icon(Icons.delete_rounded, color: kRed, size: 18),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trainersTabMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'ENTRENADORES',
-          style: TextStyle(
-            color: kWhite,
-            fontSize: 13,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 1,
-          ),
-        ),
-        const SizedBox(height: 14),
-        if (trainers.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(40),
-            child: Center(
-              child: Text(
-                'Sin entrenadores registrados',
-                style: TextStyle(color: kMuted),
-              ),
-            ),
-          )
-        else
-          ...trainers.map((t) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _trainerCardMobile(t),
-              )),
-      ],
-    );
-  }
-
-  Widget _trainerCardMobile(Map<String, dynamic> trainer) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: kBorder),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(colors: [kPurple, kRed]),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              trainer['name'].toString().substring(0, 1).toUpperCase(),
-              style: const TextStyle(
-                color: kWhite,
-                fontSize: 20,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  trainer['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                Text(
-                  trainer['specialty'].toString(),
-                  style: const TextStyle(color: kPurple, fontSize: 10),
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    const Icon(Icons.star_rounded, color: kYellow, size: 12),
-                    const SizedBox(width: 3),
-                    Text(
-                      trainer['rating'].toString(),
-                      style: const TextStyle(color: kWhite, fontSize: 10),
-                    ),
-                    const SizedBox(width: 10),
-                    const Icon(Icons.people_rounded, color: kMuted, size: 12),
-                    const SizedBox(width: 3),
-                    Text(
-                      '${trainer['clients']}',
-                      style: const TextStyle(color: kMuted, fontSize: 10),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Icon(
-            Icons.schedule_rounded,
-            color: kGreen,
-            size: 16,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _scheduleTabMobile() {
-    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            const Expanded(
-              child: Text(
-                'HORARIO SEMANAL',
-                style: TextStyle(
-                  color: kWhite,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1,
-                ),
-              ),
-            ),
-            ElevatedButton.icon(
-              onPressed: addClass,
-              icon: const Icon(Icons.add_rounded, size: 16),
-              label: const Text(
-                'NUEVA',
-                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 10),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kGreen,
-                foregroundColor: Colors.black,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        ...days.map((day) {
-          final dayClasses = classes.where((c) => c['day'] == day).toList()
-            ..sort(
-                (a, b) => a['time'].toString().compareTo(b['time'].toString()));
-
-          return Container(
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: kPanel,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: kBorder),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.calendar_today_rounded,
-                        color: kGreen, size: 14),
-                    const SizedBox(width: 8),
-                    Text(
-                      day,
-                      style: const TextStyle(
-                        color: kWhite,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '(${dayClasses.length})',
-                      style: const TextStyle(color: kMuted, fontSize: 11),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                if (dayClasses.isEmpty)
-                  const Text(
-                    'Sin clases',
-                    style: TextStyle(color: kMuted, fontSize: 11),
-                  )
-                else
-                  ...dayClasses.map((c) => _classSlotMobile(c)),
-              ],
-            ),
-          );
-        }),
-      ],
-    );
-  }
-
-  Widget _classSlotMobile(Map<String, dynamic> classItem) {
-    final typeColors = {
-      'YOGA': kPurple,
-      'SPINNING': kYellow,
-      'CROSSFIT': kRed,
-      'BOXEO': kGreen,
-      'PILATES': kPurple,
-    };
-    final color = typeColors[classItem['type']] ?? kWhite;
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: kPanel2,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.15),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              classItem['time'].toString(),
-              style: TextStyle(
-                color: color,
-                fontSize: 10,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  classItem['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                Text(
-                  '${classItem['trainer']} · ${classItem['enrolled']}/${classItem['capacity']}',
-                  style: const TextStyle(color: kMuted, fontSize: 10),
-                ),
-              ],
-            ),
-          ),
-          InkWell(
-            onTap: () => deleteClass(classItem),
-            child: const Icon(Icons.close_rounded, color: kMuted, size: 16),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _heroMobile() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: kBorder),
-      ),
-      child: Column(
-        children: [
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'COMMAND CENTER',
-              style: TextStyle(
-                color: kRed,
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 2,
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'AFORO',
-              style: TextStyle(
-                color: kWhite,
-                fontSize: 28,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-          const SizedBox(height: 18),
-          SizedBox(
-            width: 180,
-            height: 180,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                CustomPaint(
-                  size: const Size(180, 180),
-                  painter: _OccupancyPainter(
-                    percentage: occupancy,
-                  ),
-                ),
-                if (loadingCheckins)
-                  const SizedBox(
-                    width: 70,
-                    height: 70,
-                    child: CircularProgressIndicator(
-                      color: kGreen,
-                      strokeWidth: 3,
-                    ),
-                  )
-                else
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        '$inside',
-                        style: const TextStyle(
-                          color: kWhite,
-                          fontSize: 42,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const Text(
-                        'DENTRO',
-                        style: TextStyle(
-                          color: kMuted,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 2,
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            '$inside personas dentro · ${capacity - inside} libres',
-            style: const TextStyle(
-              color: kMuted,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _metricsMobile() {
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 10,
-      mainAxisSpacing: 10,
-      childAspectRatio: 0.95,
-      children: [
-        _metric(
-          'INGRESOS',
-          formatPrice(income),
-          Icons.payments_rounded,
-          kYellow,
-          trend: '+14%',
-          chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0],
-        ),
-        _metric(
-          'MIEMBROS',
-          activeMembers.toString(),
-          Icons.people_alt_rounded,
-          kPurple,
-          trend: '+8%',
-          chartData: const [0.5, 0.55, 0.6, 0.58, 0.7, 0.75, 0.85, 1.0],
-        ),
-        _metric(
-          'POR VENCER',
-          members.where((m) => m['status'] == 'POR VENCER').length.toString(),
-          Icons.warning_amber_rounded,
-          kYellow,
-          trend: '7d',
-          chartData: const [0.3, 0.4, 0.35, 0.5, 0.45, 0.55, 0.5, 0.6],
-        ),
-        _metric(
-          'VENCIDOS',
-          members.where((m) => m['status'] == 'VENCIDO').length.toString(),
-          Icons.block_rounded,
-          kRed,
-          trend: '-3%',
-          chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5],
-        ),
-      ],
-    );
-  }
-
-  Widget _mobileNav() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(6, 8, 6, 10),
-      decoration: const BoxDecoration(
-        color: Color(0xFF010101),
-        border: Border(
-          top: BorderSide(color: kBorder),
-        ),
-      ),
-      child: Row(
-        children: [
-          _navItem(
-            Icons.grid_view_rounded,
-            'Inicio',
-            0,
-          ),
-          _navItem(
-            Icons.people_alt_rounded,
-            'Clientes',
-            1,
-          ),
-          Expanded(
-            child: GestureDetector(
-              onTap: showAccessScanner,
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 6),
-                height: 55,
-                decoration: BoxDecoration(
-                  color: kRed,
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: kRed.withOpacity(.40),
-                      blurRadius: 22,
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.qr_code_scanner_rounded,
-                  color: Colors.black,
-                  size: 28,
-                ),
-              ),
-            ),
-          ),
-          _navItem(
-            Icons.fitness_center_rounded,
-            'Entreno',
-            5,
-          ),
-          _navItem(
-            Icons.payments_rounded,
-            'Finanzas',
-            4,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _navItem(
-    IconData icon,
-    String label,
-    int index,
-  ) {
-    final selected = _section == index;
-
-    return Expanded(
-      child: GestureDetector(
-        onTap: () {
-          setState(() {
-            _section = index;
-          });
-        },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                icon,
-                color: selected ? kRed : kMuted,
-                size: 21,
-              ),
-              const SizedBox(height: 3),
-              Text(
-                label,
-                style: TextStyle(
-                  color: selected ? kWhite : kMuted,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _qrCenterMobile() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'ACCESO QR',
-            style: TextStyle(
-              color: kWhite,
-              fontSize: 24,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 1,
-            ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            'Genera el codigo de acceso del gimnasio',
-            style: TextStyle(
-              color: kMuted,
-              fontSize: 12,
-            ),
-          ),
-          const SizedBox(height: 20),
-          _button(
-            'REGENERAR QR',
-            kGreen,
-            generateGymQr,
-            darkText: true,
-          ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'QR DEL GIMNASIO',
-            child: Column(
-              children: [
+              if (alertCount(context) > 0)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 14,
                     vertical: 8,
                   ),
                   decoration: BoxDecoration(
-                    color: kGreen.withOpacity(.15),
+                    color: context.colors.red.withValues(alpha: .12),
                     borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    qrTimeLeft,
-                    style: const TextStyle(
-                      color: kGreen,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w900,
+                    border: Border.all(
+                      color: context.colors.red.withValues(alpha: .35),
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
-                Screenshot(
-                  controller: _qrScreenshotController,
-                  child: Container(
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(18),
-                    ),
-                    child: QrImageView(
-                      data: qrToken.isEmpty ? 'SYNTH-GYM-LOADING' : qrToken,
-                      size: 200,
-                      backgroundColor: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  qrToken.isEmpty ? 'Generando...' : qrToken,
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: downloadQrAsPng,
-                        icon: const Icon(Icons.download_rounded, size: 16),
-                        label: const Text(
-                          'DESCARGAR',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 10,
-                          ),
-                        ),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: kWhite,
-                          side: const BorderSide(color: kBorder),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: shareQrPng,
-                        icon: const Icon(Icons.share_rounded, size: 16),
-                        label: const Text(
-                          'COMPARTIR',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 10,
-                          ),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: kPurple,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'MODO',
-            child: Column(
-              children: [
-                _modeOption(
-                  'DIARIO',
-                  'Cada dia',
-                  Icons.calendar_today_rounded,
-                  kYellow,
-                ),
-                const SizedBox(height: 8),
-                _modeOption(
-                  'SEMANAL',
-                  'Cada semana',
-                  Icons.date_range_rounded,
-                  kPurple,
-                ),
-                const SizedBox(height: 8),
-                _modeOption(
-                  'FIJO',
-                  'Nunca',
-                  Icons.lock_rounded,
-                  kGreen,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'RESUMEN DEL DIA',
-            child: Column(
-              children: [
-                _accessStat('DENTRO AHORA', inside.toString(), kGreen),
-                const SizedBox(height: 12),
-                _accessStat(
-                  'ENTRADAS HOY',
-                  activities
-                      .where((a) => a['type'] == 'ENTRADA')
-                      .length
-                      .toString(),
-                  kPurple,
-                ),
-                const SizedBox(height: 12),
-                _accessStat(
-                  'BLOQUEADOS',
-                  activities
-                      .where((a) => a['type'] == 'BLOQUEADO')
-                      .length
-                      .toString(),
-                  kRed,
-                ),
-                const SizedBox(height: 12),
-                _accessStat(
-                  'SALIDAS',
-                  activities
-                      .where((a) => a['type'] == 'SALIDA')
-                      .length
-                      .toString(),
-                  kYellow,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'ACTIVIDAD EN VIVO',
-            child: activities.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Center(
-                      child: Text(
-                        'Sin accesos registrados',
-                        style: TextStyle(color: kMuted),
-                      ),
-                    ),
-                  )
-                : Column(
-                    children: activities.take(5).map((log) {
-                      final authorized = log['type'] != 'BLOQUEADO';
-                      final color = authorized ? kGreen : kRed;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
                         decoration: BoxDecoration(
-                          color: kPanel2,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: color.withOpacity(.20)),
+                          color: context.colors.red,
+                          shape: BoxShape.circle,
                         ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              authorized
-                                  ? Icons.check_circle_rounded
-                                  : Icons.block_rounded,
-                              color: color,
-                              size: 20,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                log['name'].toString(),
-                                style: const TextStyle(
-                                  color: kWhite,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            Text(
-                              log['time'].toString(),
-                              style: const TextStyle(
-                                color: kMuted,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${alertCount(context)} pendientes',
+                        style: TextStyle(
+                          color: context.colors.red,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
                         ),
-                      );
-                    }).toList(),
-                  ),
-          ),
-          const SizedBox(height: 20),
-          _button(
-            'ESCANEAR CLIENTE',
-            kRed,
-            showAccessScanner,
-          ),
-          const SizedBox(height: 10),
-          _button(
-            'REGISTRAR SALIDA',
-            kYellow,
-            registerExit,
-            darkText: true,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _plansPageMobile() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'PLANES',
-                  style: TextStyle(
-                    color: kWhite,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w900,
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              IconButton(
-                onPressed: addPlan,
-                icon: const Icon(
-                  Icons.add_circle_rounded,
-                  color: kPurple,
-                  size: 30,
-                ),
-              ),
             ],
           ),
-          const SizedBox(height: 15),
-          if (plans.isEmpty)
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              _alertFilterChip('TODAS', 'Todas'),
+              const SizedBox(width: 8),
+              _alertFilterChip('PENDIENTES', 'Pendientes'),
+              const SizedBox(width: 8),
+              _alertFilterChip('VENCIDAS', 'Vencidas'),
+              const SizedBox(width: 8),
+              _alertFilterChip('POR VENCER', 'Por vencer'),
+              const SizedBox(width: 8),
+              _alertFilterChip('INFO', 'Info'),
+            ],
+          ),
+          const SizedBox(height: 24),
+          if (filtered.isEmpty)
             _card(
-              title: 'SIN PLANES',
-              child: const Padding(
-                padding: EdgeInsets.all(30),
+              title: 'SIN ALERTAS',
+              child: Padding(
+                padding: const EdgeInsets.all(40),
                 child: Center(
-                  child: Text(
-                    'Crea tu primer plan',
-                    style: TextStyle(color: kMuted),
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 70,
+                        height: 70,
+                        decoration: BoxDecoration(
+                          color: context.colors.green.withValues(alpha: .12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Icon(
+                          Icons.check_circle_rounded,
+                          color: context.colors.green,
+                          size: 34,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Text(
+                        'Todo en orden',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'No hay alertas pendientes por ahora',
+                        style: TextStyle(
+                            color: context.colors.muted, fontSize: 12),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
                   ),
                 ),
               ),
             )
           else
-            ...plans.map((p) {
-              final price = (p['price'] as num).toDouble();
-              final name = p['name'].toString();
-
-              Color planColor = kPurple;
-              IconData planIcon = Icons.card_membership_rounded;
-
-              if (name.toLowerCase().contains('basic')) {
-                planColor = kYellow;
-                planIcon = Icons.star_border_rounded;
-              } else if (name.toLowerCase().contains('premium')) {
-                planColor = kRed;
-                planIcon = Icons.workspace_premium_rounded;
-              } else if (name.toLowerCase().contains('elite')) {
-                planColor = kPurple;
-                planIcon = Icons.diamond_rounded;
-              } else if (name.toLowerCase().contains('10')) {
-                planColor = kGreen;
-                planIcon = Icons.timer_rounded;
-              }
-
-              return Container(
-                margin: const EdgeInsets.only(bottom: 14),
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: kPanel,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: planColor.withOpacity(.35),
-                    width: 1.5,
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 42,
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color: planColor.withOpacity(.15),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: planColor.withOpacity(.35),
-                            ),
-                          ),
-                          child: Icon(
-                            planIcon,
-                            color: planColor,
-                            size: 22,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            name.toUpperCase(),
-                            style: const TextStyle(
-                              color: kWhite,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1,
-                            ),
-                          ),
-                        ),
-                        PopupMenuButton<String>(
-                          icon: const Icon(
-                            Icons.more_vert_rounded,
-                            color: kMuted,
-                            size: 20,
-                          ),
-                          color: kPanel2,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            side: const BorderSide(color: kBorder),
-                          ),
-                          onSelected: (value) {
-                            if (value == 'edit') {
-                              editPlan(p);
-                            } else if (value == 'delete') {
-                              deletePlan(p);
-                            }
-                          },
-                          itemBuilder: (context) => [
-                            const PopupMenuItem<String>(
-                              value: 'edit',
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.edit_rounded,
-                                    color: kYellow,
-                                    size: 18,
-                                  ),
-                                  SizedBox(width: 10),
-                                  Text(
-                                    'Editar',
-                                    style: TextStyle(color: kWhite),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const PopupMenuItem<String>(
-                              value: 'delete',
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.delete_rounded,
-                                    color: kRed,
-                                    size: 18,
-                                  ),
-                                  SizedBox(width: 10),
-                                  Text(
-                                    'Eliminar',
-                                    style: TextStyle(color: kWhite),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      formatPrice(price),
-                      style: TextStyle(
-                        color: planColor,
-                        fontSize: 34,
-                        fontWeight: FontWeight.w900,
-                        height: 1.0,
-                      ),
-                    ),
-                    if (showConversion) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        formatPriceSecondary(price),
-                        style: const TextStyle(
-                          color: kMuted,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: 16),
-                    Text(
-                      '${p['days']} días · ${p['access']}',
-                      style: const TextStyle(
-                        color: kMuted,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: () => sharePlan(p, price),
-                        icon: const Icon(Icons.share_rounded, size: 16),
-                        label: const Text(
-                          'COMPARTIR PLAN',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 11,
-                            letterSpacing: 0.5,
-                          ),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: planColor,
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }),
+            ...filtered.map((alert) => _alertCard(alert)),
         ],
       ),
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // WIDGETS AUXILIARES
-  // ═══════════════════════════════════════════════════════════
+  Widget _alertsPageMobile() {
+    final filtered = filteredAlerts(context);
 
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Alertas',
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            alertCount(context) == 0
+                ? 'Todo al día'
+                : '${alertCount(context)} ${alertCount(context) == 1 ? "pendiente" : "pendientes"}',
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
+          ),
+          const SizedBox(height: 18),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _alertFilterChipMobile('TODAS', 'Todas'),
+                const SizedBox(width: 8),
+                _alertFilterChipMobile('PENDIENTES', 'Pendientes'),
+                const SizedBox(width: 8),
+                _alertFilterChipMobile('VENCIDAS', 'Vencidas'),
+                const SizedBox(width: 8),
+                _alertFilterChipMobile('POR VENCER', 'Por vencer'),
+                const SizedBox(width: 8),
+                _alertFilterChipMobile('INFO', 'Info'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          if (filtered.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(40),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Center(
+                child: Column(
+                  children: [
+                    Container(
+                      width: 70,
+                      height: 70,
+                      decoration: BoxDecoration(
+                        color: context.colors.green.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Icon(
+                        Icons.check_circle_rounded,
+                        color: context.colors.green,
+                        size: 34,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Todo en orden',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'No hay alertas pendientes',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            ...filtered.map((alert) => _alertCard(alert)),
+        ],
+      ),
+    );
+  }
+
+  Widget _alertCard(Map<String, dynamic> alert) {
+    final color = alert['color'] as Color;
+    final icon = alert['icon'] as IconData;
+    final isPending = alert['action'] == 'approve_client';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: color.withValues(alpha: .3),
+          width: 1.2,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Icon(icon, color: color, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: .15),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        alert['type'].toString(),
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      alert['title'].toString(),
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      alert['subtitle'].toString(),
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: () => dismissAlert(alert['id'].toString()),
+                icon: Icon(Icons.close_rounded,
+                    color: context.colors.muted, size: 18),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              if (isPending)
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      final member = alert['member'] as Map<String, dynamic>?;
+                      if (member != null) approveClient(member);
+                    },
+                    icon: const Icon(Icons.check_rounded, size: 16),
+                    label: const Text(
+                      'APROBAR',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 11,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: context.colors.green,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+              if (alert['action'] == 'client_detail' && alert['member'] != null)
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => showClientDetail(
+                        alert['member'] as Map<String, dynamic>),
+                    icon: const Icon(Icons.person_rounded, size: 16),
+                    label: const Text(
+                      'VER CLIENTE',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 11,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: context.colors.white,
+                      side: BorderSide(color: context.colors.border),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+              if (alert['action'] == 'dashboard')
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => setState(() => _section = 0),
+                    icon: const Icon(Icons.dashboard_rounded, size: 16),
+                    label: const Text(
+                      'VER DASHBOARD',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 11,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: context.colors.white,
+                      side: BorderSide(color: context.colors.border),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _alertFilterChip(String value, String label) {
+    final selected = alertFilter == value;
+    return Expanded(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(13),
+        onTap: () => setState(() => alertFilter = value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: selected
+                ? context.colors.red.withValues(alpha: .15)
+                : context.colors.panel2,
+            borderRadius: BorderRadius.circular(13),
+            border: Border.all(
+              color: selected
+                  ? context.colors.red.withValues(alpha: .45)
+                  : context.colors.border,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? context.colors.red : context.colors.muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _alertFilterChipMobile(String value, String label) {
+    final selected = alertFilter == value;
+    return GestureDetector(
+      onTap: () => setState(() => alertFilter = value),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+              ? context.colors.red.withValues(alpha: .15)
+              : context.colors.panel,
+          borderRadius: BorderRadius.circular(30),
+          border: Border.all(
+            color: selected
+                ? context.colors.red.withValues(alpha: .55)
+                : context.colors.border,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? context.colors.red : context.colors.muted,
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // WIDGETS AUXILIARES COMPARTIDOS
+  // ═══════════════════════════════════════════════════════════
   Widget _quickAction(
     IconData icon,
     String text,
@@ -9453,9 +12223,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return Container(
       padding: const EdgeInsets.all(15),
       decoration: BoxDecoration(
-        color: kPanel,
+        color: context.colors.panel,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: kBorder),
+        border: Border.all(color: context.colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -9466,7 +12236,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 width: 34,
                 height: 34,
                 decoration: BoxDecoration(
-                  color: color.withOpacity(.12),
+                  color: color.withValues(alpha: .12),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(icon, color: color, size: 18),
@@ -9474,12 +12244,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               const Spacer(),
               if (trend != null)
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 3,
-                  ),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                   decoration: BoxDecoration(
-                    color: color.withOpacity(.12),
+                    color: color.withValues(alpha: .12),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
@@ -9496,8 +12264,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 10),
           Text(
             title,
-            style: const TextStyle(
-              color: kMuted,
+            style: TextStyle(
+              color: context.colors.muted,
               fontSize: 9,
               fontWeight: FontWeight.w900,
               letterSpacing: .8,
@@ -9506,8 +12274,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 3),
           Text(
             value,
-            style: const TextStyle(
-              color: kWhite,
+            style: TextStyle(
+              color: context.colors.white,
               fontSize: 20,
               fontWeight: FontWeight.w900,
               height: 1.0,
@@ -9517,10 +12285,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             const SizedBox(height: 2),
             Text(
               subtitle,
-              style: const TextStyle(
-                color: kMuted,
-                fontSize: 9,
-              ),
+              style: TextStyle(color: context.colors.muted, fontSize: 9),
             ),
           ],
           const SizedBox(height: 8),
@@ -9549,9 +12314,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: kPanel,
+        color: context.colors.panel,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kBorder),
+        border: Border.all(color: context.colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -9561,8 +12326,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
-                    color: kWhite,
+                  style: TextStyle(
+                    color: context.colors.white,
                     fontSize: 14,
                     fontWeight: FontWeight.w900,
                     letterSpacing: 1,
@@ -9574,8 +12339,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   onPressed: onAction,
                   child: Text(
                     action,
-                    style: const TextStyle(
-                      color: kRed,
+                    style: TextStyle(
+                      color: context.colors.red,
                       fontSize: 10,
                       fontWeight: FontWeight.w900,
                     ),
@@ -9590,20 +12355,17 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _statusChip(
-    String text,
-    Color color,
-  ) {
+  Widget _statusChip(String text, Color color) {
     return Container(
       padding: const EdgeInsets.symmetric(
         horizontal: 10,
         vertical: 6,
       ),
       decoration: BoxDecoration(
-        color: color.withOpacity(.10),
+        color: color.withValues(alpha: .10),
         borderRadius: BorderRadius.circular(30),
         border: Border.all(
-          color: color.withOpacity(.35),
+          color: color.withValues(alpha: .35),
         ),
       ),
       child: Text(
@@ -9617,17 +12379,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _accessStat(
-    String title,
-    String value,
-    Color color,
-  ) {
+  Widget _accessStat(String title, String value, Color color) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: kPanel2,
+        color: context.colors.panel2,
         borderRadius: BorderRadius.circular(15),
-        border: Border.all(color: kBorder),
+        border: Border.all(color: context.colors.border),
       ),
       child: Row(
         children: [
@@ -9643,8 +12401,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(
-                color: kMuted,
+              style: TextStyle(
+                color: context.colors.muted,
                 fontSize: 11,
                 fontWeight: FontWeight.w800,
               ),
@@ -9656,55 +12414,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               color: color,
               fontSize: 23,
               fontWeight: FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _notification(
-    String title,
-    String text,
-    Color color,
-  ) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: kPanel2,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: color.withOpacity(.25),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.notifications_active_rounded,
-            color: color,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  text,
-                  style: const TextStyle(
-                    color: kMuted,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
             ),
           ),
         ],
@@ -9750,42 +12459,30 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     return TextField(
       controller: controller,
       keyboardType: keyboard,
-      style: const TextStyle(color: kWhite),
-      decoration: _inputDecoration(label),
+      style: TextStyle(color: context.colors.white),
+      decoration: _inputDecoration(context, label),
     );
   }
 
   InputDecoration _inputDecoration(
+    BuildContext ctx,
     String label, {
     IconData? prefixIcon,
   }) {
     return InputDecoration(
       labelText: label,
-      labelStyle: const TextStyle(
-        color: kMuted,
-      ),
-      prefixIcon: prefixIcon == null
-          ? null
-          : Icon(
-              prefixIcon,
-              color: kMuted,
-            ),
+      labelStyle: TextStyle(color: ctx.colors.muted),
+      prefixIcon:
+          prefixIcon == null ? null : Icon(prefixIcon, color: ctx.colors.muted),
       filled: true,
-      fillColor: kPanel2,
+      fillColor: ctx.colors.panel2,
       enabledBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(13),
-        borderSide: const BorderSide(
-          color: kBorder,
-        ),
+        borderSide: BorderSide(color: ctx.colors.border),
       ),
-      focusedBorder: const OutlineInputBorder(
-        borderRadius: BorderRadius.all(
-          Radius.circular(13),
-        ),
-        borderSide: BorderSide(
-          color: kPurple,
-          width: 1.5,
-        ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(13),
+        borderSide: BorderSide(color: ctx.colors.purple, width: 1.5),
       ),
     );
   }
@@ -9793,571 +12490,2654 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _dialog({
     required String title,
     required Widget child,
-    Color accent = kRed,
+    Color? accent,
   }) {
-    return Dialog(
-      backgroundColor: kPanel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(24),
-        side: const BorderSide(
-          color: kBorder,
-        ),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(
-          maxWidth: 560,
-          maxHeight: 700,
-        ),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(25),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
+    return Builder(
+      builder: (ctx) {
+        final ac = accent ?? ctx.colors.red;
+        return Dialog(
+          backgroundColor: ctx.colors.panel,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+            side: BorderSide(color: ctx.colors.border),
+          ),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560, maxHeight: 700),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(25),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 9,
-                    height: 30,
-                    decoration: BoxDecoration(
-                      color: accent,
-                      borderRadius: BorderRadius.circular(5),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        color: kWhite,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      color: kMuted,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              child,
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // DASHBOARD — HERO + METRICS + CARDS
-  // ═══════════════════════════════════════════════════════════
-
-  Widget _hero() {
-    final percent = (occupancy * 100).round();
-
-    return Container(
-      padding: const EdgeInsets.all(28),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: kBorder),
-        boxShadow: [
-          BoxShadow(
-            color: kRed.withOpacity(.08),
-            blurRadius: 35,
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'CONTROL EN TIEMPO REAL',
-                  style: TextStyle(
-                    color: kRed,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 2,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'AFORO DEL GIMNASIO',
-                  style: TextStyle(
-                    color: kWhite,
-                    fontSize: 31,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '$inside personas dentro · ${capacity - inside} espacios disponibles',
-                  style: const TextStyle(
-                    color: kMuted,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 22),
-                Row(
-                  children: [
-                    _statusChip(
-                      '$percent% OCUPADO',
-                      kRed,
-                    ),
-                    const SizedBox(width: 10),
-                    _statusChip(
-                      'OPERATIVO',
-                      kGreen,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          SizedBox(
-            width: 190,
-            height: 190,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                CustomPaint(
-                  size: const Size(190, 190),
-                  painter: _OccupancyPainter(
-                    percentage: occupancy,
-                  ),
-                ),
-                if (loadingCheckins)
-                  const SizedBox(
-                    width: 80,
-                    height: 80,
-                    child: CircularProgressIndicator(
-                      color: kGreen,
-                      strokeWidth: 3,
-                    ),
-                  )
-                else
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        '$inside',
-                        style: const TextStyle(
-                          color: kWhite,
-                          fontSize: 43,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const Text(
-                        'DENTRO',
-                        style: TextStyle(
-                          color: kMuted,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 2,
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _metrics() {
-    return GridView.count(
-      crossAxisCount: 4,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 14,
-      mainAxisSpacing: 14,
-      childAspectRatio: 0.95,
-      children: [
-        _metric(
-          'INGRESOS',
-          formatPrice(income),
-          Icons.payments_rounded,
-          kYellow,
-          trend: '+14.2%',
-          subtitle: 'este mes',
-          chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0],
-        ),
-        _metric(
-          'MIEMBROS ACTIVOS',
-          activeMembers.toString(),
-          Icons.people_alt_rounded,
-          kPurple,
-          trend: '+8.4%',
-          subtitle: 'vs mes anterior',
-          chartData: const [0.5, 0.55, 0.6, 0.58, 0.7, 0.75, 0.85, 1.0],
-        ),
-        _metric(
-          'POR VENCER',
-          members.where((m) => m['status'] == 'POR VENCER').length.toString(),
-          Icons.warning_amber_rounded,
-          kYellow,
-          trend: '7 días',
-          subtitle: 'requieren atención',
-          chartData: const [0.3, 0.4, 0.35, 0.5, 0.45, 0.55, 0.5, 0.6],
-        ),
-        _metric(
-          'VENCIDOS',
-          members.where((m) => m['status'] == 'VENCIDO').length.toString(),
-          Icons.block_rounded,
-          kRed,
-          trend: '-3.1%',
-          subtitle: 'vs mes anterior',
-          chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5],
-        ),
-      ],
-    );
-  }
-
-  Widget _activityCard() {
-    return _card(
-      title: 'ACTIVIDAD RECIENTE',
-      action: 'VER TODO',
-      onAction: showActivity,
-      child: activities.isEmpty
-          ? const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(
-                child: Text(
-                  'Sin actividad reciente',
-                  style: TextStyle(color: kMuted),
-                ),
-              ),
-            )
-          : Column(
-              children: activities.take(5).map((a) {
-                Color color = kPurple;
-
-                if (a['type'] == 'ENTRADA') {
-                  color = kGreen;
-                }
-
-                if (a['type'] == 'PAGO') {
-                  color = kYellow;
-                }
-
-                return ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: color.withOpacity(.10),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(
-                      Icons.bolt_rounded,
-                      color: color,
-                    ),
-                  ),
-                  title: Text(
-                    a['name'] ?? '',
-                    style: const TextStyle(
-                      color: kWhite,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  subtitle: Text(
-                    a['type'] ?? '',
-                    style: const TextStyle(
-                      color: kMuted,
-                      fontSize: 11,
-                    ),
-                  ),
-                  trailing: Text(
-                    a['time'] ?? '',
-                    style: const TextStyle(
-                      color: kMuted,
-                      fontSize: 11,
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-    );
-  }
-
-  Widget _plansCard() {
-    return _card(
-      title: 'PLANES',
-      action: 'NUEVO',
-      onAction: addPlan,
-      child: plans.isEmpty
-          ? const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(
-                child: Text(
-                  'Sin planes registrados',
-                  style: TextStyle(color: kMuted),
-                ),
-              ),
-            )
-          : Column(
-              children: plans.take(4).map((p) {
-                final price = (p['price'] as num).toDouble();
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.all(13),
-                  decoration: BoxDecoration(
-                    color: kPanel2,
-                    borderRadius: BorderRadius.circular(13),
-                    border: Border.all(color: kBorder),
-                  ),
-                  child: Row(
+                  Row(
                     children: [
                       Container(
-                        width: 8,
-                        height: 55,
+                        width: 9,
+                        height: 30,
                         decoration: BoxDecoration(
-                          color: kPurple,
+                          color: ac,
                           borderRadius: BorderRadius.circular(5),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              p['name'].toString(),
-                              style: const TextStyle(
-                                color: kWhite,
-                                fontWeight: FontWeight.w900,
-                              ),
-                            ),
-                            const SizedBox(height: 3),
-                            Text(
-                              '${p['days']} días · ${p['access']}',
-                              style: const TextStyle(
-                                color: kMuted,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ],
+                        child: Text(
+                          title,
+                          style: TextStyle(
+                            color: ctx.colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1,
+                          ),
                         ),
                       ),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            formatPrice(price),
-                            style: const TextStyle(
-                              color: kYellow,
-                              fontWeight: FontWeight.w900,
-                              fontSize: 15,
-                            ),
-                          ),
-                          if (showConversion)
-                            Text(
-                              formatPriceSecondary(price),
-                              style: const TextStyle(
-                                color: kMuted,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                        ],
+                      IconButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: Icon(
+                          Icons.close_rounded,
+                          color: ctx.colors.muted,
+                        ),
                       ),
                     ],
                   ),
-                );
-              }).toList(),
+                  const SizedBox(height: 20),
+                  child,
+                ],
+              ),
             ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _membersCard() {
-    final query = searchController.text.toLowerCase();
+  Widget _modeOption(
+    String mode,
+    String description,
+    IconData icon,
+    Color color,
+  ) {
+    final isSelected = qrMode == mode;
 
-    final filtered = members.where((m) {
-      return m['name'].toString().toLowerCase().contains(query);
-    }).toList();
+    return InkWell(
+      borderRadius: BorderRadius.circular(13),
+      onTap: () {
+        setState(() => qrMode = mode);
+        generateGymQr();
+      },
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color:
+              isSelected ? color.withValues(alpha: .15) : context.colors.panel2,
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(
+            color: isSelected
+                ? color.withValues(alpha: .45)
+                : context.colors.border,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: .12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: color, size: 18),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    mode,
+                    style: TextStyle(
+                      color: isSelected
+                          ? context.colors.white
+                          : context.colors.muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isSelected)
+              Icon(
+                Icons.check_circle_rounded,
+                color: color,
+                size: 20,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
-    return _card(
-      title: 'MIEMBROS',
-      action: 'AGREGAR',
-      onAction: addMember,
+  Widget _infoRow(String label, String value) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: context.colors.muted,
+              fontSize: 11,
+            ),
+          ),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            color: context.colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MÓDULO EN CONSTRUCCIÓN
+  // ═══════════════════════════════════════════════════════════
+  Widget _modulePage() {
+    return Center(
+      child: Text(
+        'Módulo en construcción',
+        style: TextStyle(color: context.colors.muted),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // SHOW CLIENT DETAIL + ACTIVITY
+  // ═══════════════════════════════════════════════════════════
+  void showClientDetail(Map<String, dynamic> member) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _ClientProfilePage(
+          member: member,
+          formatPrice: formatPrice,
+          onEdit: () => editMember(member),
+          onDelete: () => deleteMember(member),
+          transactions: transactions,
+        ),
+      ),
+    );
+  }
+
+  void showActivity() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return _dialog(
+          title: 'ACTIVIDAD RECIENTE',
+          child: SizedBox(
+            width: 560,
+            child: ListView(
+              shrinkWrap: true,
+              children: activities.isEmpty
+                  ? [
+                      Padding(
+                        padding: const EdgeInsets.all(30),
+                        child: Center(
+                          child: Text(
+                            'Sin actividad reciente',
+                            style: TextStyle(color: dialogContext.colors.muted),
+                          ),
+                        ),
+                      ),
+                    ]
+                  : activities.map((a) {
+                      return ListTile(
+                        leading: Icon(
+                          Icons.bolt_rounded,
+                          color: dialogContext.colors.yellow,
+                        ),
+                        title: Text(
+                          a['name'] ?? '',
+                          style: TextStyle(color: dialogContext.colors.white),
+                        ),
+                        subtitle: Text(
+                          a['type'] ?? '',
+                          style: TextStyle(color: dialogContext.colors.muted),
+                        ),
+                        trailing: Text(
+                          a['time'] ?? '',
+                          style: TextStyle(color: dialogContext.colors.muted),
+                        ),
+                      );
+                    }).toList(),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MOBILE (ADMIN)
+  // ═══════════════════════════════════════════════════════════
+  Widget _mobile() {
+    final ac = alertCount(context);
+
+    return SafeArea(
       child: Column(
         children: [
-          TextField(
-            controller: searchController,
-            onChanged: (_) => setState(() {}),
-            style: const TextStyle(color: kWhite),
-            decoration: _inputDecoration(
-              'Buscar miembro',
-              prefixIcon: Icons.search_rounded,
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            decoration: BoxDecoration(
+              color: context.colors.bg,
+              border: Border(bottom: BorderSide(color: context.colors.border)),
+            ),
+            child: Row(
+              children: [
+                InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => _scaffoldKey.currentState?.openDrawer(),
+                  child: Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: context.colors.panel,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: context.colors.border),
+                    ),
+                    child: Icon(
+                      Icons.menu_rounded,
+                      color: context.colors.white,
+                      size: 22,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: context.colors.red,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.bolt_rounded,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Text(
+                    'SYNTHETIX GYM OS',
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => themeController.toggle(),
+                  icon: Icon(
+                    themeController.isDark
+                        ? Icons.light_mode_rounded
+                        : Icons.dark_mode_rounded,
+                    color: context.colors.yellow,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => loadAllData(),
+                  icon: Icon(
+                    Icons.refresh_rounded,
+                    color: context.colors.green,
+                  ),
+                ),
+                Stack(
+                  children: [
+                    IconButton(
+                      onPressed: showNotifications,
+                      icon: Icon(
+                        Icons.notifications_none_rounded,
+                        color: context.colors.white,
+                      ),
+                    ),
+                    if (ac > 0)
+                      Positioned(
+                        right: 8,
+                        top: 8,
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          constraints: const BoxConstraints(
+                            minWidth: 16,
+                            minHeight: 16,
+                          ),
+                          decoration: BoxDecoration(
+                            color: context.colors.red,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Text(
+                            '$ac',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: loadingData
+                ? Center(
+                    child:
+                        CircularProgressIndicator(color: context.colors.green),
+                  )
+                : _mobileContent(),
+          ),
+          _mobileNav(),
+        ],
+      ),
+    );
+  }
+
+  Widget _mobileContent() {
+    switch (_section) {
+      case 0:
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 110),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _heroMobile(),
+              const SizedBox(height: 18),
+              _metricsMobile(),
+              const SizedBox(height: 18),
+              _activityCard(),
+              const SizedBox(height: 16),
+              _plansCard(),
+              const SizedBox(height: 16),
+              _membersCard(),
+            ],
+          ),
+        );
+      case 1:
+        return _clientsPage();
+      case 2:
+        return _qrCenterMobile();
+      case 3:
+        return _plansPageMobile();
+      case 4:
+        return _financePage();
+      case 5:
+        return _trainingPageMobile();
+      case 6:
+        return _alertsPageMobile();
+      case 7:
+        return _currencyPage();
+      default:
+        return _modulePage();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ENTRENAMIENTO MÓVIL
+  // ═══════════════════════════════════════════════════════════
+  Widget _trainingPageMobile() {
+    final tabs = ['Rutinas', 'Ejercicios', 'Trainers', 'Tipos', 'Horario'];
+
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
+          decoration: BoxDecoration(
+            color: context.colors.bg,
+            border: Border(bottom: BorderSide(color: context.colors.border)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Entrenamiento',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: -0.5,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Rutinas · Ejercicios · Entrenadores · Clases',
+                style: TextStyle(color: context.colors.muted, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: List.generate(tabs.length, (i) {
+                    final active = trainingTab == i;
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: GestureDetector(
+                        onTap: () => setState(() => trainingTab = i),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 11,
+                          ),
+                          decoration: BoxDecoration(
+                            color: active
+                                ? context.colors.purple.withValues(alpha: .15)
+                                : context.colors.panel,
+                            borderRadius: BorderRadius.circular(30),
+                            border: Border.all(
+                              color: active
+                                  ? context.colors.purple.withValues(alpha: .55)
+                                  : context.colors.border,
+                              width: 1.2,
+                            ),
+                          ),
+                          child: Text(
+                            tabs[i],
+                            style: TextStyle(
+                              color: active
+                                  ? context.colors.purple
+                                  : context.colors.muted,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                ),
+              ),
+              const SizedBox(height: 14),
+            ],
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 110),
+            child: _trainingContentMobile(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _trainingContentMobile() {
+    switch (trainingTab) {
+      case 0:
+        return _routinesTabMobile();
+      case 1:
+        return _exercisesTabMobile();
+      case 2:
+        return _trainersTabMobile();
+      case 3:
+        return _classTypesTabMobile();
+      case 4:
+        return _scheduleTabMobile();
+      default:
+        return _routinesTabMobile();
+    }
+  }
+
+  Widget _routinesTabMobile() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _trainingHeader(
+          title: 'Rutinas',
+          count: routines.length,
+          labelAction: 'NUEVA RUTINA',
+          onAction: addRoutine,
+        ),
+        const SizedBox(height: 16),
+        if (routines.isEmpty)
+          _emptyState(
+            icon: Icons.fitness_center_rounded,
+            color: context.colors.red,
+            title: 'Sin rutinas',
+            subtitle: 'Crea tu primera rutina de entrenamiento',
+            actionLabel: 'CREAR RUTINA',
+            onAction: addRoutine,
+          )
+        else
+          ...routines.map((r) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _routineCardMobile(r),
+              )),
+      ],
+    );
+  }
+
+  Widget _routineCardMobile(Map<String, dynamic> routine) {
+    final level = routine['level'].toString();
+    final levelColor = level == 'Principiante'
+        ? context.colors.green
+        : level == 'Intermedio'
+            ? context.colors.yellow
+            : context.colors.red;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  routine['name'].toString(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              _menuBtn(
+                onEdit: () => editRoutine(routine),
+                onDelete: () => deleteRoutine(routine),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: levelColor.withValues(alpha: .12),
+              borderRadius: BorderRadius.circular(30),
+              border: Border.all(color: levelColor.withValues(alpha: .4)),
+            ),
+            child: Text(
+              level,
+              style: TextStyle(
+                color: levelColor,
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.5,
+              ),
             ),
           ),
           const SizedBox(height: 14),
-          if (filtered.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(
+          Row(
+            children: [
+              _infoChip(Icons.timer_rounded, '${routine['duration']} min'),
+              const SizedBox(width: 16),
+              _infoChip(
+                Icons.fitness_center_rounded,
+                '${routine['exercises']} ejercicios',
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
                 child: Text(
-                  'Sin miembros registrados',
-                  style: TextStyle(color: kMuted),
+                  routine['equipment'].toString(),
+                  style: TextStyle(color: context.colors.muted, fontSize: 11),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-            )
-          else
-            ...filtered.map((m) {
-              final status = m['status'].toString();
-
-              Color color = kGreen;
-
-              if (status == 'POR VENCER') {
-                color = kYellow;
-              }
-
-              if (status == 'VENCIDO') {
-                color = kRed;
-              }
-
-              return ListTile(
-                contentPadding: EdgeInsets.zero,
-                onTap: () => showClientDetail(m),
-                leading: CircleAvatar(
-                  backgroundColor: color.withOpacity(.15),
-                  child: Text(
-                    m['name'].toString().isEmpty
-                        ? '?'
-                        : m['name'].toString().substring(0, 1).toUpperCase(),
-                    style: TextStyle(
-                      color: color,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: context.colors.purple.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                title: Text(
-                  m['name'].toString(),
-                  style: const TextStyle(
-                    color: kWhite,
+                child: Text(
+                  '${routine['assigned']} asignados',
+                  style: TextStyle(
+                    color: context.colors.purple,
+                    fontSize: 10,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
-                subtitle: Text(
-                  '${m['plan']} · vence ${m['expiry']}',
-                  style: const TextStyle(
-                    color: kMuted,
-                    fontSize: 12,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _exercisesTabMobile() {
+    final muscles = [
+      'TODOS',
+      'Pecho',
+      'Espalda',
+      'Piernas',
+      'Hombros',
+      'Brazos',
+      'Core'
+    ];
+
+    final filtered = exerciseFilter == 'TODOS'
+        ? exercises
+        : exercises.where((e) => e['muscle'] == exerciseFilter).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _trainingHeader(
+          title: 'Ejercicios',
+          count: exercises.length,
+          labelAction: 'NUEVO',
+          onAction: addExercise,
+        ),
+        const SizedBox(height: 14),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: muscles.map((m) {
+              final active = exerciseFilter == m;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () => setState(() => exerciseFilter = m),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: active
+                          ? context.colors.purple.withValues(alpha: .15)
+                          : context.colors.panel,
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(
+                        color: active
+                            ? context.colors.purple.withValues(alpha: .55)
+                            : context.colors.border,
+                        width: 1.2,
+                      ),
+                    ),
+                    child: Text(
+                      m.toUpperCase(),
+                      style: TextStyle(
+                        color: active
+                            ? context.colors.purple
+                            : context.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
                   ),
                 ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (filtered.isEmpty)
+          _emptyState(
+            icon: Icons.fitness_center_rounded,
+            color: context.colors.purple,
+            title: 'Sin ejercicios',
+            subtitle: 'Agrega tu primer ejercicio a la biblioteca',
+            actionLabel: 'CREAR EJERCICIO',
+            onAction: addExercise,
+          )
+        else
+          ...filtered.map((e) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _exerciseRowMobile(e),
+              )),
+      ],
+    );
+  }
+
+  Widget _exerciseRowMobile(Map<String, dynamic> exercise) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: context.colors.purple.withValues(alpha: .12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              Icons.fitness_center_rounded,
+              color: context.colors.purple,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  exercise['name'].toString(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${exercise['muscle']} · ${exercise['sets']}x${exercise['reps']} · ${exercise['weight']}kg',
+                  style: TextStyle(color: context.colors.muted, fontSize: 11),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          _menuBtn(
+            onEdit: () => editExercise(exercise),
+            onDelete: () => deleteExercise(exercise),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _trainersTabMobile() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _trainingHeader(
+          title: 'Entrenadores',
+          count: trainers.length,
+          labelAction: 'NUEVO',
+          onAction: addTrainer,
+        ),
+        const SizedBox(height: 16),
+        if (trainers.isEmpty)
+          _emptyState(
+            icon: Icons.people_alt_rounded,
+            color: context.colors.green,
+            title: 'Sin entrenadores',
+            subtitle: 'Agrega a tu primer entrenador del equipo',
+            actionLabel: 'CREAR ENTRENADOR',
+            onAction: addTrainer,
+          )
+        else
+          ...trainers.map((t) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _trainerCardMobile(t),
+              )),
+      ],
+    );
+  }
+
+  Widget _trainerCardMobile(Map<String, dynamic> trainer) {
+    final name = trainer['name'].toString();
+    final initial = name.isEmpty ? '?' : name[0].toUpperCase();
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 50,
+                height: 50,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                      colors: [context.colors.purple, context.colors.red]),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  initial,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _statusChip(
-                      status,
-                      color,
+                    Text(
+                      name,
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(width: 4),
-                    PopupMenuButton<String>(
-                      icon: const Icon(
-                        Icons.more_vert_rounded,
-                        color: kMuted,
-                        size: 20,
+                    const SizedBox(height: 3),
+                    Text(
+                      trainer['specialty'].toString(),
+                      style: TextStyle(
+                        color: context.colors.purple,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
                       ),
-                      color: kPanel2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: const BorderSide(color: kBorder),
-                      ),
-                      onSelected: (value) {
-                        if (value == 'edit') {
-                          editMember(m);
-                        } else if (value == 'delete') {
-                          deleteMember(m);
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        const PopupMenuItem<String>(
-                          value: 'edit',
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.edit_rounded,
-                                color: kYellow,
-                                size: 18,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Editar',
-                                style: TextStyle(color: kWhite),
-                              ),
-                            ],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              _menuBtn(
+                onEdit: () => editTrainer(trainer),
+                onDelete: () => deleteTrainer(trainer),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              color: context.colors.panel2,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: context.colors.border),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _trainerStat(
+                    Icons.star_rounded,
+                    context.colors.yellow,
+                    trainer['rating'].toString(),
+                    'Rating',
+                  ),
+                ),
+                Container(width: 1, height: 30, color: context.colors.border),
+                Expanded(
+                  child: _trainerStat(
+                    Icons.people_rounded,
+                    context.colors.green,
+                    '${trainer['clients']}',
+                    'Clientes',
+                  ),
+                ),
+                Container(width: 1, height: 30, color: context.colors.border),
+                Expanded(
+                  child: _trainerStat(
+                    Icons.schedule_rounded,
+                    context.colors.purple,
+                    trainer['schedule'].toString().split(' - ').first,
+                    'Desde',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _trainerStat(IconData icon, Color color, String value, String label) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 16),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: TextStyle(
+            color: context.colors.white,
+            fontSize: 13,
+            fontWeight: FontWeight.w900,
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(
+            color: context.colors.muted,
+            fontSize: 9,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _classTypesTabMobile() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _trainingHeader(
+          title: 'Tipos de clase',
+          count: classTypes.length,
+          labelAction: 'NUEVO',
+          onAction: addClassType,
+        ),
+        const SizedBox(height: 16),
+        if (classTypes.isEmpty)
+          _emptyState(
+            icon: Icons.category_rounded,
+            color: context.colors.orange,
+            title: 'Sin tipos de clase',
+            subtitle: 'Crea tipos como Yoga, Boxeo, Spinning, etc.',
+            actionLabel: 'CREAR TIPO',
+            onAction: addClassType,
+          )
+        else
+          ...classTypes.map((ct) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _classTypeRowMobile(ct),
+              )),
+      ],
+    );
+  }
+
+  Widget _classTypeRowMobile(Map<String, dynamic> ct) {
+    final color = Color(ct['color'] as int);
+    final iconData = _iconFromCodePoint(ct['icon'] as int);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: .3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .15),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withValues(alpha: .35)),
+            ),
+            alignment: Alignment.center,
+            child: Icon(iconData, color: color, size: 24),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  ct['name'].toString().toUpperCase(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '#${color.value.toRadixString(16).substring(2).toUpperCase()}',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _menuBtn(
+            onEdit: () => editClassType(ct),
+            onDelete: () => deleteClassType(ct),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _scheduleTabMobile() {
+    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _trainingHeader(
+          title: 'Horario',
+          count: classes.length,
+          labelAction: 'NUEVA',
+          onAction: addClass,
+        ),
+        const SizedBox(height: 16),
+        if (classes.isEmpty)
+          _emptyState(
+            icon: Icons.calendar_today_rounded,
+            color: context.colors.green,
+            title: 'Sin clases',
+            subtitle: 'Programa tu primera clase del horario',
+            actionLabel: 'CREAR CLASE',
+            onAction: addClass,
+          )
+        else
+          ...days.map((day) {
+            final dayClasses = classes.where((c) => c['day'] == day).toList()
+              ..sort((a, b) =>
+                  a['time'].toString().compareTo(b['time'].toString()));
+
+            if (dayClasses.isEmpty) return const SizedBox.shrink();
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: context.colors.panel,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: context.colors.green.withValues(alpha: .12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          day,
+                          style: TextStyle(
+                            color: context.colors.green,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.8,
                           ),
                         ),
-                        const PopupMenuItem<String>(
-                          value: 'delete',
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.delete_rounded,
-                                color: kRed,
-                                size: 18,
-                              ),
-                              SizedBox(width: 10),
-                              Text(
-                                'Eliminar',
-                                style: TextStyle(color: kWhite),
-                              ),
-                            ],
-                          ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        '${dayClasses.length} ${dayClasses.length == 1 ? "clase" : "clases"}',
+                        style: TextStyle(
+                          color: context.colors.muted,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
                         ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ...dayClasses.map((c) => _classSlotMobile(c)),
+                ],
+              ),
+            );
+          }),
+      ],
+    );
+  }
+
+  Widget _classSlotMobile(Map<String, dynamic> classItem) {
+    Color color = context.colors.purple;
+    for (final ct in classTypes) {
+      if (ct['name'].toString().toUpperCase() ==
+          classItem['type'].toString().toUpperCase()) {
+        color = Color(ct['color'] as int);
+        break;
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: context.colors.panel2,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              classItem['time'].toString(),
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  classItem['name'].toString(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${classItem['trainer']} · ${classItem['enrolled']}/${classItem['capacity']}',
+                  style: TextStyle(color: context.colors.muted, fontSize: 10),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          _menuBtn(
+            onEdit: () => editClass(classItem),
+            onDelete: () => deleteClass(classItem),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _trainingHeader({
+    required String title,
+    required int count,
+    required String labelAction,
+    required VoidCallback onAction,
+  }) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                '$count ${count == 1 ? "registro" : "registros"}',
+                style: TextStyle(color: context.colors.muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        ElevatedButton.icon(
+          onPressed: onAction,
+          icon: const Icon(Icons.add_rounded, size: 16),
+          label: Text(
+            labelAction,
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 11,
+              letterSpacing: 0.3,
+            ),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: context.colors.red,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _menuBtn({
+    required VoidCallback onEdit,
+    required VoidCallback onDelete,
+  }) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: PopupMenuButton<String>(
+        padding: EdgeInsets.zero,
+        icon: Icon(
+          Icons.more_vert_rounded,
+          color: context.colors.muted,
+          size: 20,
+        ),
+        color: context.colors.panel2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: context.colors.border),
+        ),
+        onSelected: (value) {
+          if (value == 'edit') onEdit();
+          if (value == 'delete') onDelete();
+        },
+        itemBuilder: (_) => [
+          PopupMenuItem<String>(
+            value: 'edit',
+            child: Row(
+              children: [
+                Icon(Icons.edit_rounded,
+                    color: context.colors.yellow, size: 18),
+                const SizedBox(width: 10),
+                Text('Editar', style: TextStyle(color: context.colors.white)),
+              ],
+            ),
+          ),
+          PopupMenuItem<String>(
+            value: 'delete',
+            child: Row(
+              children: [
+                Icon(Icons.delete_rounded, color: context.colors.red, size: 18),
+                const SizedBox(width: 10),
+                Text('Eliminar', style: TextStyle(color: context.colors.red)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoChip(IconData icon, String text) {
+    return Row(
+      children: [
+        Icon(icon, color: context.colors.muted, size: 14),
+        const SizedBox(width: 5),
+        Text(
+          text,
+          style: TextStyle(
+            color: context.colors.white,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _emptyState({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required String actionLabel,
+    required VoidCallback onAction,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(36),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: 70,
+            height: 70,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .12),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Icon(icon, color: color, size: 34),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            title,
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: context.colors.muted, fontSize: 12),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed: onAction,
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: Text(
+                actionLabel,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: color,
+                foregroundColor: Colors.black,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // HOME FITNESS MOBILE
+  // ═══════════════════════════════════════════════════════════
+  Widget _heroMobile() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Hello,',
+                    style: TextStyle(
+                      color: context.colors.muted,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Admin',
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                    colors: [context.colors.orange, context.colors.red]),
+                border: Border.all(
+                  color: context.colors.orange.withValues(alpha: .5),
+                  width: 2,
+                ),
+              ),
+              alignment: Alignment.center,
+              child: const Icon(
+                Icons.admin_panel_settings_rounded,
+                color: Colors.white,
+                size: 22,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: context.colors.cardBg,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: context.colors.white.withValues(alpha: .04),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Aforo actual',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$inside personas dentro',
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 11),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        _miniDotStat(
+                            '$capacity', 'Capacidad', context.colors.muted),
+                        const SizedBox(width: 14),
+                        _miniDotStat('${capacity - inside}', 'Libres',
+                            context.colors.green),
                       ],
                     ),
                   ],
                 ),
-              );
-            }),
+              ),
+              const SizedBox(width: 14),
+              SizedBox(
+                width: 110,
+                height: 110,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    TweenAnimationBuilder<double>(
+                      duration: const Duration(milliseconds: 1400),
+                      curve: Curves.easeOutCubic,
+                      tween: Tween(begin: 0.0, end: occupancy),
+                      builder: (context, value, _) {
+                        return CustomPaint(
+                          size: const Size(110, 110),
+                          painter: _RingPainter(
+                            percentage: value,
+                            color: context.colors.orange,
+                            trackColor:
+                                context.colors.white.withValues(alpha: .06),
+                            strokeWidth: 9,
+                          ),
+                        );
+                      },
+                    ),
+                    if (loadingCheckins)
+                      SizedBox(
+                        width: 30,
+                        height: 30,
+                        child: CircularProgressIndicator(
+                          color: context.colors.orange,
+                          strokeWidth: 2.5,
+                        ),
+                      )
+                    else
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '$inside',
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w900,
+                              height: 1,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'DENTRO',
+                            style: TextStyle(
+                              color: context.colors.muted,
+                              fontSize: 8,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _miniDotStat(String value, String label, Color color) {
+    return Row(
+      children: [
+        Container(
+          width: 6,
+          height: 6,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              value,
+              style: TextStyle(
+                color: context.colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            Text(
+              label,
+              style: TextStyle(color: context.colors.muted, fontSize: 9),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _metricsMobile() {
+    final totalClientes = members.length;
+    final activos = members.where((m) => m['status'] == 'ACTIVO').length;
+    final pendientes = members.where((m) => m['status'] == 'PENDIENTE').length;
+    final vencidos = members.where((m) => m['status'] == 'VENCIDO').length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 12),
+          child: Text(
+            'MÉTRICAS',
+            style: TextStyle(
+              color: context.colors.muted,
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 2,
+            ),
+          ),
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: _fitnessMetricCard(
+                icon: Icons.attach_money_rounded,
+                iconColor: context.colors.orange,
+                title: 'Ingresos',
+                value: formatPrice(income),
+                unit: 'este mes',
+                trend: '+14%',
+                trendColor: context.colors.orange,
+                chart: _RingMiniChart(
+                  percentage: 0.72,
+                  color: context.colors.orange,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _fitnessMetricCard(
+                icon: Icons.people_alt_rounded,
+                iconColor: context.colors.cyan,
+                title: 'Miembros',
+                value: '$totalClientes',
+                unit: '$activos activos',
+                trend: '+8%',
+                trendColor: context.colors.cyan,
+                chart: _BarsMiniChart(
+                  data: const [0.4, 0.55, 0.7, 0.5, 0.8, 0.6, 0.9],
+                  color: context.colors.cyan,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _fitnessMetricCard(
+                icon: Icons.person_add_alt_1_rounded,
+                iconColor: context.colors.purple,
+                title: 'Pendientes',
+                value: '$pendientes',
+                unit: 'por aprobar',
+                trend: 'HOY',
+                trendColor: context.colors.purple,
+                chart: _LineMiniChart(
+                  data: const [0.3, 0.5, 0.4, 0.7, 0.5, 0.8, 0.6],
+                  color: context.colors.purple,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _fitnessMetricCard(
+                icon: Icons.block_rounded,
+                iconColor: context.colors.red,
+                title: 'Vencidos',
+                value: '$vencidos',
+                unit: 'requieren renovar',
+                trend: '-3%',
+                trendColor: context.colors.red,
+                chart: _LineMiniChart(
+                  data: const [0.9, 0.75, 0.8, 0.6, 0.5, 0.4, 0.3],
+                  color: context.colors.red,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _fitnessMetricCard({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String value,
+    required String unit,
+    required String trend,
+    required Color trendColor,
+    required Widget chart,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.colors.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: context.colors.white.withValues(alpha: .04),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: iconColor, size: 16),
+              ),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: trendColor.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  trend,
+                  style: TextStyle(
+                    color: trendColor,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            style: TextStyle(
+              color: context.colors.muted,
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .5,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      value,
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        height: 1,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      unit,
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 9),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(width: 48, height: 48, child: chart),
+            ],
+          ),
         ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // NAV INFERIOR MÓVIL
+  // ═══════════════════════════════════════════════════════════
+  Widget _mobileNav() {
+    final items = [
+      {'icon': Icons.home_rounded, 'label': 'Inicio', 'index': 0},
+      {'icon': Icons.people_alt_rounded, 'label': 'Clientes', 'index': 1},
+      {'icon': Icons.qr_code_scanner_rounded, 'label': 'Scan', 'index': -1},
+      {'icon': Icons.fitness_center_rounded, 'label': 'Entreno', 'index': 5},
+      {'icon': Icons.payments_rounded, 'label': 'Finanzas', 'index': 4},
+    ];
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(40),
+        border: Border.all(
+          color: context.colors.white.withValues(alpha: .06),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .55),
+            blurRadius: 25,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: items.map((item) {
+          final idx = item['index'] as int;
+          final isScan = idx == -1;
+          final selected = _section == idx;
+
+          if (isScan) {
+            return GestureDetector(
+              onTap: showAccessScanner,
+              child: Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [context.colors.orange, const Color(0xFFFF5500)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: context.colors.orange.withValues(alpha: .55),
+                      blurRadius: 20,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.qr_code_scanner_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
+              ),
+            );
+          }
+
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => setState(() => _section = idx),
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      item['icon'] as IconData,
+                      color: selected
+                          ? context.colors.orange
+                          : context.colors.muted,
+                      size: 20,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      item['label'] as String,
+                      style: TextStyle(
+                        color: selected
+                            ? context.colors.white
+                            : context.colors.muted,
+                        fontSize: 9,
+                        fontWeight:
+                            selected ? FontWeight.w800 : FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════
-// PAINTERS
+// PERFIL DEL CLIENTE (usado desde ADMIN)
 // ═══════════════════════════════════════════════════════════
+class _ClientProfilePage extends StatelessWidget {
+  final Map<String, dynamic> member;
+  final String Function(double) formatPrice;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final List<Map<String, dynamic>> transactions;
 
+  const _ClientProfilePage({
+    required this.member,
+    required this.formatPrice,
+    required this.onEdit,
+    required this.onDelete,
+    required this.transactions,
+  });
+
+  Color _statusColor(BuildContext context) {
+    final s = member['status'].toString();
+    if (s == 'ACTIVO') return context.colors.green;
+    if (s == 'POR VENCER') return context.colors.yellow;
+    if (s == 'PENDIENTE') return context.colors.purple;
+    return context.colors.red;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = member['name'].toString();
+    final initial = name.isEmpty ? '?' : name[0].toUpperCase();
+    final payments = (member['payments'] as num?)?.toInt() ?? 0;
+    final totalPaid = (member['totalPaid'] as num?)?.toDouble() ?? 0.0;
+    final attendance = (member['attendance'] as num?)?.toInt() ?? 0;
+
+    final memberTx =
+        transactions.where((t) => t['name'] == name).take(10).toList();
+
+    final statusColor = _statusColor(context);
+
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.fromLTRB(8, 8, 16, 8),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: context.colors.white,
+                      size: 20,
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      'Perfil del cliente',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _showActions(context),
+                    icon: Icon(
+                      Icons.more_horiz_rounded,
+                      color: context.colors.white,
+                      size: 24,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 88,
+                            height: 88,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  statusColor,
+                                  statusColor.withValues(alpha: .5),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: statusColor.withValues(alpha: .30),
+                                  blurRadius: 24,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              initial,
+                              style: const TextStyle(
+                                color: Colors.black,
+                                fontSize: 36,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          Text(
+                            name,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: -.3,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            member['phone'].toString(),
+                            style: TextStyle(
+                              color: context.colors.muted,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: statusColor.withValues(alpha: .12),
+                              borderRadius: BorderRadius.circular(30),
+                              border: Border.all(
+                                color: statusColor.withValues(alpha: .40),
+                              ),
+                            ),
+                            child: Text(
+                              member['status'].toString(),
+                              style: TextStyle(
+                                color: statusColor,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _miniStatTile(
+                            icon: Icons.event_available_rounded,
+                            color: context.colors.purple,
+                            value: '$attendance',
+                            label: 'Asistencia',
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _miniStatTile(
+                            icon: Icons.receipt_long_rounded,
+                            color: context.colors.yellow,
+                            value: '$payments',
+                            label: 'Pagos',
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _miniStatTile(
+                            icon: Icons.attach_money_rounded,
+                            color: context.colors.green,
+                            value: formatPrice(totalPaid),
+                            label: 'Total',
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    _profileCard(
+                      title: 'INFORMACIÓN',
+                      icon: Icons.info_outline_rounded,
+                      color: context.colors.purple,
+                      child: Column(
+                        children: [
+                          _infoRowDetail(
+                            'Plan',
+                            member['plan'].toString(),
+                          ),
+                          _infoRowDetail(
+                            'Vence',
+                            member['expiry'].toString(),
+                          ),
+                          _infoRowDetail(
+                            'Miembro desde',
+                            member['memberSince'].toString(),
+                          ),
+                          _infoRowDetail(
+                            'Última visita',
+                            member['lastVisit'].toString(),
+                            isLast: true,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _profileCard(
+                      title: 'QR DE ACCESO',
+                      icon: Icons.qr_code_rounded,
+                      color: context.colors.green,
+                      child: Column(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(18),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                            child: QrImageView(
+                              data: member['qrCode'].toString(),
+                              size: 180,
+                              backgroundColor: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 14),
+                          Text(
+                            member['qrCode'].toString(),
+                            style: TextStyle(
+                              color: context.colors.muted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _profileCard(
+                      title: 'HISTORIAL DE PAGOS',
+                      icon: Icons.receipt_rounded,
+                      color: context.colors.yellow,
+                      child: memberTx.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 20),
+                              child: Center(
+                                child: Text(
+                                  'Sin pagos registrados',
+                                  style: TextStyle(
+                                      color: context.colors.muted,
+                                      fontSize: 12),
+                                ),
+                              ),
+                            )
+                          : Column(
+                              children: memberTx
+                                  .map((t) => _paymentHistoryRow(t))
+                                  .toList(),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+              decoration: BoxDecoration(
+                color: context.colors.bg,
+                border: Border(
+                  top: BorderSide(color: context.colors.border),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Future.microtask(() => onEdit());
+                      },
+                      icon: Icon(Icons.edit_rounded,
+                          color: context.colors.yellow, size: 18),
+                      label: Text(
+                        'EDITAR',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12,
+                          letterSpacing: .5,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        side: BorderSide(color: context.colors.border),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content:
+                                Text('Notificando a $name por WhatsApp...'),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                      icon: const FaIcon(FontAwesomeIcons.whatsapp, size: 18),
+                      label: const Text(
+                        'WHATSAPP',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12,
+                          letterSpacing: .5,
+                        ),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: context.colors.green,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showActions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: context.colors.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: sheetContext.colors.muted.withValues(alpha: .4),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading:
+                  Icon(Icons.edit_rounded, color: sheetContext.colors.yellow),
+              title: Text(
+                'Editar miembro',
+                style: TextStyle(
+                    color: sheetContext.colors.white,
+                    fontWeight: FontWeight.w700),
+              ),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                Navigator.pop(sheetContext);
+                Future.microtask(() => onEdit());
+              },
+            ),
+            ListTile(
+              leading:
+                  Icon(Icons.delete_rounded, color: sheetContext.colors.red),
+              title: Text(
+                'Eliminar miembro',
+                style: TextStyle(
+                    color: sheetContext.colors.red,
+                    fontWeight: FontWeight.w700),
+              ),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                Navigator.pop(sheetContext);
+                Future.microtask(() => onDelete());
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _miniStatTile({
+    required IconData icon,
+    required Color color,
+    required String value,
+    required String label,
+  }) {
+    return Builder(
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+          decoration: BoxDecoration(
+            color: context.colors.panel,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: context.colors.border),
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: Icon(icon, color: color, size: 18),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                value,
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: context.colors.muted,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _profileCard({
+    required String title,
+    required IconData icon,
+    required Color color,
+    required Widget child,
+  }) {
+    return Builder(
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: context.colors.panel,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: context.colors.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(icon, color: color, size: 16),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              child,
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _infoRowDetail(String label, String value, {bool isLast = false}) {
+    return Builder(
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 4,
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+              Expanded(
+                flex: 6,
+                child: Text(
+                  value,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _paymentHistoryRow(Map<String, dynamic> t) {
+    return Builder(
+      builder: (context) {
+        final method = t['method'].toString();
+        final amount = (t['amount'] as num).toDouble();
+        final date = t['date'].toString();
+
+        Color methodColor = context.colors.green;
+        IconData methodIcon = Icons.payments_rounded;
+        if (method == 'TARJETA') {
+          methodColor = context.colors.purple;
+          methodIcon = Icons.credit_card_rounded;
+        } else if (method == 'TRANSFERENCIA') {
+          methodColor = context.colors.yellow;
+          methodIcon = Icons.swap_horiz_rounded;
+        }
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: context.colors.panel2,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: context.colors.border),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: methodColor.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(methodIcon, color: methodColor, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      method,
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      date,
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                formatPrice(amount),
+                style: TextStyle(
+                  color: context.colors.green,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAINTER: AFORO CIRCULAR DASHBOARD
+// ═══════════════════════════════════════════════════════════
+class _OccupancyPainter extends CustomPainter {
+  final double percentage;
+  final Color trackColor;
+  final List<Color> progressColors;
+
+  _OccupancyPainter({
+    required this.percentage,
+    required this.trackColor,
+    required this.progressColors,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 12;
+
+    final trackPaint = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 14
+      ..strokeCap = StrokeCap.round;
+
+    final progressPaint = Paint()
+      ..shader = SweepGradient(
+        colors: progressColors,
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 14
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawCircle(center, radius, trackPaint);
+
+    final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      sweepAngle,
+      false,
+      progressPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _OccupancyPainter oldDelegate) =>
+      oldDelegate.percentage != percentage;
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAINTER: ANILLO CIRCULAR
+// ═══════════════════════════════════════════════════════════
+class _RingPainter extends CustomPainter {
+  final double percentage;
+  final Color color;
+  final Color trackColor;
+  final double strokeWidth;
+
+  _RingPainter({
+    required this.percentage,
+    required this.color,
+    required this.trackColor,
+    this.strokeWidth = 8,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - strokeWidth / 2;
+
+    final trackPaint = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    final progressPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawCircle(center, radius, trackPaint);
+
+    final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      sweepAngle,
+      false,
+      progressPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RingPainter oldDelegate) =>
+      oldDelegate.percentage != percentage || oldDelegate.color != color;
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAINTER: MINI GRÁFICA DE LÍNEA
+// ═══════════════════════════════════════════════════════════
 class _MiniChartPainter extends CustomPainter {
   final List<double> data;
   final Color color;
 
-  _MiniChartPainter({
-    required this.data,
-    required this.color,
-  });
+  _MiniChartPainter({required this.data, required this.color});
 
   @override
   void paint(Canvas canvas, Size size) {
     if (data.isEmpty) return;
 
-    final maxVal = data.reduce((a, b) => a > b ? a : b);
-    final minVal = data.reduce((a, b) => a < b ? a : b);
-    final range = (maxVal - minVal).abs() < 0.01 ? 1.0 : (maxVal - minVal);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          color.withValues(alpha: .35),
+          color.withValues(alpha: .0),
+        ],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..style = PaintingStyle.fill;
 
     final path = Path();
     final fillPath = Path();
 
+    final stepX = size.width / (data.length - 1);
+    final maxVal = data.reduce((a, b) => a > b ? a : b);
+    final safeMax = maxVal == 0 ? 1.0 : maxVal;
+
     for (int i = 0; i < data.length; i++) {
-      final x = (size.width / (data.length - 1)) * i;
-      final normalized = (data[i] - minVal) / range;
-      final y = size.height - (normalized * size.height * 0.9) - 2.0;
+      final x = i * stepX;
+      final y = size.height - (data[i] / safeMax) * size.height;
 
       if (i == 0) {
         path.moveTo(x, y);
@@ -10372,110 +15152,115 @@ class _MiniChartPainter extends CustomPainter {
     fillPath.lineTo(size.width, size.height);
     fillPath.close();
 
-    final fillPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          color.withOpacity(.25),
-          color.withOpacity(.0),
-        ],
-      ).createShader(Offset.zero & size);
-
     canvas.drawPath(fillPath, fillPaint);
+    canvas.drawPath(path, paint);
+  }
 
-    final linePaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
+  @override
+  bool shouldRepaint(covariant _MiniChartPainter oldDelegate) =>
+      oldDelegate.data != data || oldDelegate.color != color;
+}
 
-    canvas.drawPath(path, linePaint);
+// ═══════════════════════════════════════════════════════════
+// WIDGET: MINI ANILLO PARA MÉTRICAS
+// ═══════════════════════════════════════════════════════════
+class _RingMiniChart extends StatelessWidget {
+  final double percentage;
+  final Color color;
 
-    if (data.length > 1) {
-      final lastX = size.width;
-      final lastNormalized = (data.last - minVal) / range;
-      final lastY = size.height - (lastNormalized * size.height * 0.9) - 2.0;
+  const _RingMiniChart({required this.percentage, required this.color});
 
-      canvas.drawCircle(
-        Offset(lastX, lastY),
-        3,
-        Paint()..color = color,
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 1200),
+      curve: Curves.easeOutCubic,
+      tween: Tween(begin: 0.0, end: percentage.clamp(0.0, 1.0)),
+      builder: (context, value, _) {
+        return CustomPaint(
+          painter: _RingPainter(
+            percentage: value,
+            color: color,
+            trackColor: Colors.white.withValues(alpha: .06),
+            strokeWidth: 6,
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// WIDGET: MINI BARRAS PARA MÉTRICAS
+// ═══════════════════════════════════════════════════════════
+class _BarsMiniChart extends StatelessWidget {
+  final List<double> data;
+  final Color color;
+
+  const _BarsMiniChart({required this.data, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _BarsPainter(data: data, color: color),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAINTER: BARRAS
+// ═══════════════════════════════════════════════════════════
+class _BarsPainter extends CustomPainter {
+  final List<double> data;
+  final Color color;
+
+  _BarsPainter({required this.data, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (data.isEmpty) return;
+
+    final maxVal = data.reduce((a, b) => a > b ? a : b);
+    final safeMax = maxVal == 0 ? 1.0 : maxVal;
+
+    final barWidth = (size.width / data.length) * 0.6;
+    final gap = (size.width / data.length) * 0.4;
+
+    final paint = Paint()..style = PaintingStyle.fill;
+
+    for (int i = 0; i < data.length; i++) {
+      final barHeight = (data[i] / safeMax) * size.height * 0.9;
+      final x = i * (barWidth + gap) + gap / 2;
+      final y = size.height - barHeight;
+
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, y, barWidth, barHeight),
+        const Radius.circular(2),
       );
-      canvas.drawCircle(
-        Offset(lastX, lastY),
-        5,
-        Paint()..color = color.withOpacity(.3),
-      );
+
+      paint.color = color.withValues(alpha: 0.4 + (i / data.length) * 0.6);
+      canvas.drawRRect(rect, paint);
     }
   }
 
   @override
-  bool shouldRepaint(covariant _MiniChartPainter oldDelegate) {
-    return oldDelegate.data != data || oldDelegate.color != color;
-  }
+  bool shouldRepaint(covariant _BarsPainter oldDelegate) =>
+      oldDelegate.data != data || oldDelegate.color != color;
 }
 
-class _OccupancyPainter extends CustomPainter {
-  final double percentage;
+// ═══════════════════════════════════════════════════════════
+// WIDGET: MINI LÍNEA PARA MÉTRICAS
+// ═══════════════════════════════════════════════════════════
+class _LineMiniChart extends StatelessWidget {
+  final List<double> data;
+  final Color color;
 
-  _OccupancyPainter({
-    required this.percentage,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(
-      size.width / 2,
-      size.height / 2,
-    );
-
-    final radius = size.width / 2 - 13;
-
-    final background = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round
-      ..color = const Color(0xFF171717);
-
-    canvas.drawCircle(
-      center,
-      radius,
-      background,
-    );
-
-    final rect = Rect.fromCircle(
-      center: center,
-      radius: radius,
-    );
-
-    final progress = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round
-      ..shader = const SweepGradient(
-        colors: [
-          kRed,
-          kPurple,
-          kYellow,
-          kRed,
-        ],
-      ).createShader(rect);
-
-    canvas.drawArc(
-      rect,
-      -math.pi / 2,
-      math.pi * 2 * percentage,
-      false,
-      progress,
-    );
-  }
+  const _LineMiniChart({required this.data, required this.color});
 
   @override
-  bool shouldRepaint(
-    covariant _OccupancyPainter oldDelegate,
-  ) {
-    return oldDelegate.percentage != percentage;
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _MiniChartPainter(data: data, color: color),
+    );
   }
 }
