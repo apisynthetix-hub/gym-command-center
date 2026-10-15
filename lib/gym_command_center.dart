@@ -46,7 +46,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   bool regLoading = false;
 
   String loginScreen = 'choose';
-
   int _section = 0;
 
   int capacity = 150;
@@ -112,6 +111,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     'TRANSFERENCIA': 0,
   };
   List<Map<String, dynamic>> topPlans = [];
+  List<Map<String, dynamic>> renewalRequests = [];
 
   final List<String> monthLabels = [
     'ENE',
@@ -619,6 +619,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       'room': 'Box Cross'
     },
   ];
+
   double get totalIncome => transactions
       .where((t) => t['type'] == 'INGRESO')
       .fold(0.0, (s, t) => s + (t['amount'] as num).toDouble());
@@ -690,7 +691,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return transactions;
   }
 
-  // ── ALERTAS ──
+  // ═══════════════════════════════════════════════════════════
+  // ALERTAS
+  // ═══════════════════════════════════════════════════════════
   List<Map<String, dynamic>> activeAlerts(BuildContext context) {
     final alerts = <Map<String, dynamic>>[];
 
@@ -788,7 +791,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     _saveLocalData();
   }
 
-  // ── LOGIN / PIN ──
+  // ═══════════════════════════════════════════════════════════
+  // LOGIN / PIN
+  // ═══════════════════════════════════════════════════════════
   bool get isPinLocked {
     if (pinLockedUntil == null) return false;
     return DateTime.now().isBefore(pinLockedUntil!);
@@ -1028,17 +1033,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       addActivity('NUEVO REGISTRO', name);
       await _saveLocalData();
-
-      if (mounted) {
-        final ctx = context;
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(
-            content: const Text('✅ Registro enviado. Espera aprobación.'),
-            backgroundColor: ctx.colors.green,
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
     } catch (e) {
       debugPrint('❌ Error registro: $e');
       if (mounted) {
@@ -1122,11 +1116,12 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     );
   }
 
-  Future<void> openGymWhatsApp({String? clientName}) async {
+  Future<void> openGymWhatsApp({String? clientName, String? customText}) async {
     final cleanPhone = gymPhone.replaceAll(RegExp(r'[^0-9]'), '');
-    final text = clientName != null && clientName.isNotEmpty
-        ? 'Hola, soy $clientName. Quiero consultar sobre mi membresía en SYNTHETIX GYM.'
-        : 'Hola, quiero consultar sobre SYNTHETIX GYM.';
+    final text = customText ??
+        (clientName != null && clientName.isNotEmpty
+            ? 'Hola, soy $clientName. Quiero consultar sobre mi membresía en SYNTHETIX GYM.'
+            : 'Hola, quiero consultar sobre SYNTHETIX GYM.');
     final url = 'https://wa.me/$cleanPhone?text=${Uri.encodeComponent(text)}';
 
     try {
@@ -1154,6 +1149,60 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         );
       }
     }
+  }
+
+  Future<void> requestRenewal() async {
+    final client = loggedClient;
+    if (client == null) return;
+
+    final name = client['name'].toString();
+    final plan = client['plan'].toString();
+    final expiry = client['expiry'].toString();
+    final cedula = client['cedula'].toString();
+
+    final customText =
+        '🔄 SOLICITUD DE RENOVACIÓN\n\n👤 Cliente: $name\n🆔 Cédula: $cedula\n📋 Plan: $plan\n📅 Vence: $expiry\n\nQuiero renovar mi membresía.';
+
+    await openGymWhatsApp(clientName: name, customText: customText);
+
+    final notifId =
+        'renewal-${client['id']}-${DateTime.now().millisecondsSinceEpoch}';
+    setState(() {
+      renewalRequests.insert(0, {
+        'id': notifId,
+        'memberId': client['id'],
+        'name': name,
+        'cedula': cedula,
+        'plan': plan,
+        'expiry': expiry,
+        'createdAt': DateTime.now().toIso8601String(),
+        'read': false,
+      });
+    });
+    addActivity('RENOVACIÓN', '$name solicitó renovación');
+
+    try {
+      final supabase = Supabase.instance.client;
+      await supabase.from('activities').insert({
+        'type': 'RENOVACIÓN',
+        'name': '$name solicitó renovación',
+      });
+    } catch (e) {
+      debugPrint('⚠️ Error enviando notif renovación: $e');
+    }
+
+    await _saveLocalData();
+
+    if (!mounted) return;
+    final ctx = context;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(
+        content:
+            const Text('✅ Solicitud enviada. El gym recibió tu notificación.'),
+        backgroundColor: ctx.colors.green,
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   Future<void> loadClientAforo() async {
@@ -1263,7 +1312,383 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
-  // ── PERSISTENCIA (offline-first) ──
+  // ═══════════════════════════════════════════════════════════
+  // CHECK-IN POR QR DEL GIMNASIO (CLIENTE)
+  // ═══════════════════════════════════════════════════════════
+  bool _qrProcessing = false;
+
+  Future<void> _processGymQrScan(String scannedCode) async {
+    if (_qrProcessing) return;
+    if (loggedClient == null) return;
+
+    _qrProcessing = true;
+    final client = loggedClient!;
+    final memberId = client['id'];
+    final memberName = client['name'].toString();
+    final status = client['status'].toString().toUpperCase();
+
+    final isValid = scannedCode.startsWith('SYNTH-GYM-');
+
+    if (!isValid) {
+      _qrProcessing = false;
+      if (!mounted) return;
+      await _showAccessOverlay(
+        success: false,
+        title: 'QR INVÁLIDO',
+        subtitle: 'Este código no pertenece al gimnasio.',
+        name: memberName,
+        status: 'INVÁLIDO',
+      );
+      return;
+    }
+
+    String type = 'ENTRADA';
+    try {
+      final supabase = Supabase.instance.client;
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      final startOfDayStr = startOfDay.toIso8601String();
+
+      final todayCheckins = await supabase
+          .from('checkins')
+          .select()
+          .eq('member_id', memberId)
+          .gte('created_at', startOfDayStr)
+          .order('created_at', ascending: true);
+
+      final lastType = todayCheckins.isNotEmpty
+          ? todayCheckins.last['type'].toString().toUpperCase()
+          : '';
+
+      type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
+
+      final isBlocked = status != 'ACTIVO';
+
+      await supabase.from('checkins').insert({
+        'member_id': memberId,
+        'type': type,
+        'authorized': !isBlocked,
+        'reason': isBlocked ? 'Membresía $status' : null,
+        'registered_by': 'client_qr',
+      });
+
+      await supabase.from('activities').insert({
+        'type': isBlocked ? 'BLOQUEADO' : type,
+        'name': memberName,
+      });
+
+      if (type == 'ENTRADA' && !isBlocked) {
+        final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
+        await supabase.from('members').update({
+          'attendance': attendance + 1,
+          'last_visit': _formatDate(DateTime.now()),
+        }).eq('id', memberId);
+
+        if (mounted) {
+          setState(() {
+            loggedClient!['attendance'] = attendance + 1;
+            loggedClient!['lastVisit'] = _formatDate(DateTime.now());
+            inside++;
+            clientInsideCount++;
+          });
+          await loadClientStreak();
+        }
+      } else if (type == 'SALIDA') {
+        if (mounted) {
+          setState(() {
+            if (clientInsideCount > 0) clientInsideCount--;
+          });
+        }
+      }
+
+      if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
+
+      await loadActivities();
+      await loadCheckins();
+      await loadClientAforo();
+      await _saveLocalData();
+
+      if (!mounted) return;
+      await _showAccessOverlay(
+        success: !isBlocked,
+        title: isBlocked ? 'ACCESO DENEGADO' : 'ACCESO PERMITIDO',
+        subtitle: isBlocked
+            ? 'Membresía $status. Contacta al gym.'
+            : type == 'ENTRADA'
+                ? '¡Bienvenido al gimnasio!'
+                : '¡Hasta pronto!',
+        name: memberName,
+        status: status,
+        type: type,
+      );
+    } catch (e) {
+      debugPrint('❌ Error procesando QR: $e');
+      if (mounted) {
+        await _showAccessOverlay(
+          success: false,
+          title: 'ERROR DE CONEXIÓN',
+          subtitle: 'No se pudo registrar. Intenta de nuevo.',
+          name: memberName,
+          status: 'ERROR',
+        );
+      }
+    } finally {
+      _qrProcessing = false;
+    }
+  }
+
+  Future<dynamic> _showAccessOverlay({
+    required bool success,
+    required String title,
+    required String subtitle,
+    required String name,
+    required String status,
+    String? type,
+  }) async {
+    if (!mounted) return null;
+    final color = success ? context.colors.green : context.colors.red;
+    final icon = success ? Icons.check_circle_rounded : Icons.cancel_rounded;
+
+    return showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: .85),
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (_, __, ___) => const SizedBox.shrink(),
+      transitionBuilder: (dialogContext, animation, _, __) {
+        final scale = Tween<double>(begin: 0.7, end: 1.0).animate(
+          CurvedAnimation(parent: animation, curve: Curves.easeOutBack),
+        );
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(
+            scale: scale,
+            child: Center(
+              child: GestureDetector(
+                onTap: () => Navigator.pop(dialogContext),
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 24),
+                  padding: const EdgeInsets.all(32),
+                  decoration: BoxDecoration(
+                    color: dialogContext.colors.panel,
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(color: color, width: 3),
+                    boxShadow: [
+                      BoxShadow(
+                        color: color.withValues(alpha: .45),
+                        blurRadius: 60,
+                        spreadRadius: 4,
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 110,
+                        height: 110,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: color.withValues(alpha: .15),
+                          border: Border.all(color: color, width: 4),
+                        ),
+                        child: Icon(icon, color: color, size: 64),
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        title,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          color: dialogContext.colors.panel2,
+                          borderRadius: BorderRadius.circular(18),
+                          border:
+                              Border.all(color: dialogContext.colors.border),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              name.toUpperCase(),
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: dialogContext.colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: color.withValues(alpha: .15),
+                                borderRadius: BorderRadius.circular(30),
+                                border: Border.all(
+                                    color: color.withValues(alpha: .5)),
+                              ),
+                              child: Text(
+                                status,
+                                style: TextStyle(
+                                  color: color,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 2,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Text(
+                              subtitle,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: dialogContext.colors.muted,
+                                fontSize: 13,
+                                height: 1.5,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Text(
+                              '${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+                              style: TextStyle(
+                                color: dialogContext.colors.white,
+                                fontSize: 28,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 2,
+                              ),
+                            ),
+                            if (type != null) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                type == 'ENTRADA'
+                                    ? '↑ ENTRADA REGISTRADA'
+                                    : '↓ SALIDA REGISTRADA',
+                                style: TextStyle(
+                                  color: dialogContext.colors.muted,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.5,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        'Toca para cerrar',
+                        style: TextStyle(
+                          color: dialogContext.colors.muted,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> openClientQrScanner() async {
+    if (loggedClient == null) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          height: MediaQuery.of(sheetContext).size.height * 0.85,
+          decoration: BoxDecoration(
+            color: sheetContext.colors.bg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: sheetContext.colors.muted.withValues(alpha: .4),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  children: [
+                    Icon(Icons.qr_code_scanner_rounded,
+                        color: sheetContext.colors.green, size: 26),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'ESCANEAR ACCESO',
+                        style: TextStyle(
+                          color: sheetContext.colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: Icon(Icons.close_rounded,
+                          color: sheetContext.colors.muted),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: MobileScanner(
+                    onDetect: (capture) async {
+                      final barcodes = capture.barcodes;
+                      if (barcodes.isEmpty) return;
+                      final code = barcodes.first.rawValue;
+                      if (code == null || code.isEmpty) return;
+                      Navigator.pop(sheetContext);
+                      await _processGymQrScan(code);
+                    },
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Apunta al QR del gimnasio para registrar tu acceso',
+                  style: TextStyle(
+                    color: sheetContext.colors.muted,
+                    fontSize: 12,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PERSISTENCIA LOCAL
+  // ═══════════════════════════════════════════════════════════
   Future<void> _saveLocalData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -1276,11 +1701,19 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       await prefs.setString('trainers', jsonEncode(trainers));
       await prefs.setString('classes', jsonEncode(classes));
       await prefs.setString('classTypes', jsonEncode(classTypes));
+      await prefs.setString('renewalRequests', jsonEncode(renewalRequests));
       await prefs.setInt('inside', inside);
       await prefs.setStringList('dismissedAlerts', dismissedAlerts.toList());
       await prefs.setString('dismissedDate', dismissedDate);
       await prefs.setString('adminPin', adminPin);
       await prefs.setString('gymPhone', gymPhone);
+      await prefs.setString('selectedCurrency', selectedCurrency);
+      await prefs.setBool('showConversion', showConversion);
+      await prefs.setDouble('usdToVes', usdToVes);
+      await prefs.setDouble('eurToVes', eurToVes);
+      await prefs.setDouble('copToVes', copToVes);
+      await prefs.setString('qrMode', qrMode);
+      await prefs.setInt('capacity', capacity);
       debugPrint('💾 Datos guardados localmente');
     } catch (e) {
       debugPrint('❌ Error guardando local: $e');
@@ -1305,6 +1738,27 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         gymPhone = savedGymPhone;
       }
 
+      final savedCurrency = prefs.getString('selectedCurrency');
+      if (savedCurrency != null) selectedCurrency = savedCurrency;
+
+      final savedConversion = prefs.getBool('showConversion');
+      if (savedConversion != null) showConversion = savedConversion;
+
+      final savedUsd = prefs.getDouble('usdToVes');
+      if (savedUsd != null && savedUsd > 0) usdToVes = savedUsd;
+
+      final savedEur = prefs.getDouble('eurToVes');
+      if (savedEur != null && savedEur > 0) eurToVes = savedEur;
+
+      final savedCop = prefs.getDouble('copToVes');
+      if (savedCop != null && savedCop > 0) copToVes = savedCop;
+
+      final savedQrMode = prefs.getString('qrMode');
+      if (savedQrMode != null) qrMode = savedQrMode;
+
+      final savedCapacity = prefs.getInt('capacity');
+      if (savedCapacity != null && savedCapacity > 0) capacity = savedCapacity;
+
       final todayKey = _formatDateForCode(DateTime.now());
       final savedDismissedDate = prefs.getString('dismissedDate') ?? '';
       if (savedDismissedDate != todayKey) {
@@ -1327,6 +1781,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       final trainersStr = prefs.getString('trainers');
       final classesStr = prefs.getString('classes');
       final classTypesStr = prefs.getString('classTypes');
+      final renewalStr = prefs.getString('renewalRequests');
       final savedInside = prefs.getInt('inside');
 
       if (membersStr != null) {
@@ -1408,6 +1863,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           classTypes.addAll(loaded);
         }
       }
+      if (renewalStr != null) {
+        final loaded = (jsonDecode(renewalStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          renewalRequests = loaded;
+        }
+      }
       if (savedInside != null) inside = savedInside;
       debugPrint('📂 Datos cargados localmente');
     } catch (e) {
@@ -1415,7 +1878,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
-  // ── LOADERS SUPABASE (offline-first: si falla, mantiene local) ──
+  // ═══════════════════════════════════════════════════════════
+  // LOADERS SUPABASE
+  // ═══════════════════════════════════════════════════════════
   Future<void> loadMembers() async {
     try {
       debugPrint('🔄 Cargando miembros desde Supabase...');
@@ -1456,7 +1921,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         await _saveLocalData();
       }
     } catch (e) {
-      debugPrint('❌ Error loading members (mantengo local): $e');
+      debugPrint('❌ Error loading members: $e');
     }
   }
 
@@ -1574,7 +2039,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         await _saveLocalData();
       }
     } catch (e) {
-      debugPrint('❌ Error loading payments (mantengo local): $e');
+      debugPrint('❌ Error loading payments: $e');
     }
   }
 
@@ -1607,7 +2072,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         await _saveLocalData();
       }
     } catch (e) {
-      debugPrint('❌ Error loading plans (mantengo local): $e');
+      debugPrint('❌ Error loading plans: $e');
     }
   }
 
@@ -1679,7 +2144,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         loadingCheckins = false;
       });
     } catch (e) {
-      debugPrint('❌ Error cargando checkins (mantengo local): $e');
+      debugPrint('❌ Error cargando checkins: $e');
       if (mounted) setState(() => loadingCheckins = false);
     }
   }
@@ -1751,7 +2216,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     debugPrint('✅ Sincronización completa');
   }
 
-  // ── HELPERS ──
+  // ═══════════════════════════════════════════════════════════
+  // HELPERS
+  // ═══════════════════════════════════════════════════════════
   String _formatDate(DateTime d) {
     final now = DateTime.now();
     final diff = now.difference(d);
@@ -1856,11 +2323,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   void addActivity(String type, String name) {
     if (!mounted) return;
+    final now = DateTime.now();
+    final time =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     setState(() {
       activities.insert(0, {
         'type': type,
         'name': name,
-        'time': TimeOfDay.now().format(context),
+        'time': time,
       });
       if (activities.length > 20) activities.removeLast();
     });
@@ -1889,7 +2359,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
-  // ── QR GYM ──
   void generateGymQr() {
     final now = DateTime.now();
     final token = _generateToken();
@@ -1991,108 +2460,43 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   Future<void> downloadQrAsPng() async {
     try {
-      if (mounted) {
-        final ctx = context;
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          const SnackBar(
-            content: Text('Generando PNG...'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-
       final Uint8List? imageBytes = await _qrScreenshotController.capture();
-      if (imageBytes == null) {
-        if (mounted) {
-          final ctx = context;
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(
-              content: const Text('Error: no se pudo capturar el QR'),
-              backgroundColor: ctx.colors.red,
-            ),
-          );
-        }
-        return;
-      }
-
-      if (kIsWeb) {
-        // En web, copiar token + descargar como data URL
-        await Clipboard.setData(ClipboardData(text: qrToken));
-        if (mounted) {
-          final ctx = context;
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(
-              content: Text('QR token copiado: $qrToken'),
-              backgroundColor: ctx.colors.green,
-            ),
-          );
-        }
-      } else {
-        final directory = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
-        final file = File(filePath);
-        await file.writeAsBytes(imageBytes);
-        if (mounted) {
-          final ctx = context;
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(
-              content: Text('QR guardado en: $filePath'),
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-      }
-    } catch (e) {
+      if (imageBytes == null) return;
+      await Clipboard.setData(ClipboardData(text: qrToken));
       if (mounted) {
         final ctx = context;
         ScaffoldMessenger.of(ctx).showSnackBar(
           SnackBar(
-            content: Text('Error al descargar: $e'),
-            backgroundColor: ctx.colors.red,
+            content: Text('QR token copiado: $qrToken'),
+            backgroundColor: ctx.colors.green,
           ),
         );
       }
+    } catch (e) {
+      debugPrint('Error: $e');
     }
   }
 
-  // ── COMPARTIR QR (FUNCIONAL) ──
   Future<void> shareQrPng() async {
     try {
       final Uint8List? imageBytes = await _qrScreenshotController.capture();
-      if (imageBytes == null) {
-        if (mounted) {
-          final ctx = context;
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(
-              content: const Text('Error: no se pudo capturar el QR'),
-              backgroundColor: ctx.colors.red,
-            ),
-          );
-        }
-        return;
-      }
+      if (imageBytes == null) return;
 
       if (kIsWeb) {
-        // En web, compartir texto + copiar token
-        final text =
-            'Accede al gimnasio con este código QR: $qrToken\nVálido: $qrTimeLeft';
+        final text = 'Accede con este QR: $qrToken\nVálido: $qrTimeLeft';
         await Clipboard.setData(ClipboardData(text: text));
         if (mounted) {
           final ctx = context;
           ScaffoldMessenger.of(ctx).showSnackBar(
             SnackBar(
-              content:
-                  Text('Código QR copiado. Pégalo donde quieras compartirlo.'),
+              content: Text('QR copiado: $qrToken'),
               backgroundColor: ctx.colors.purple,
-              duration: const Duration(seconds: 3),
             ),
           );
         }
         return;
       }
 
-      // Móvil: compartir archivo PNG + texto
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
@@ -2105,19 +2509,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         subject: 'Acceso QR - SYNTHETIX GYM',
       );
     } catch (e) {
-      if (mounted) {
-        final ctx = context;
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(
-            content: Text('Error al compartir: $e'),
-            backgroundColor: ctx.colors.red,
-          ),
-        );
-      }
+      debugPrint('Error: $e');
     }
   }
 
-  // ── COMPARTIR PLAN (FUNCIONAL) ──
   Future<void> sharePlan(Map<String, dynamic> plan, double price) async {
     final name = plan['name'].toString();
     final days = plan['days'].toString();
@@ -2139,36 +2534,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
     try {
       if (kIsWeb) {
-        // Web Share API si está disponible
         await Clipboard.setData(ClipboardData(text: text));
         if (mounted) {
           final ctx = context;
           ScaffoldMessenger.of(ctx).showSnackBar(
             SnackBar(
-              content: Text('Plan "$name" copiado. Pégalo donde quieras.'),
+              content: Text('Plan "$name" copiado.'),
               backgroundColor: ctx.colors.purple,
-              duration: const Duration(seconds: 3),
             ),
           );
         }
         return;
       }
-
-      // Móvil: Share nativo (abre WhatsApp, Telegram, etc.)
-      await Share.share(
-        text,
-        subject: 'Plan $name - SYNTHETIX GYM',
-      );
+      await Share.share(text, subject: 'Plan $name - SYNTHETIX GYM');
     } catch (e) {
-      if (mounted) {
-        final ctx = context;
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(
-            content: Text('Error al compartir plan: $e'),
-            backgroundColor: ctx.colors.red,
-          ),
-        );
-      }
+      debugPrint('Error: $e');
     }
   }
 
@@ -2182,6 +2562,28 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final messenger = ScaffoldMessenger.of(context);
     final ctx = context;
 
+    setState(() {
+      for (var m in members) {
+        if (m['id'] == memberId) {
+          m['status'] = 'ACTIVO';
+          m['expiry'] = expiryDate;
+          break;
+        }
+      }
+      dismissedAlerts.remove('pendiente-$memberId');
+    });
+    addActivity('APROBADO', member['name'].toString());
+    await _saveLocalData();
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('${member['name']} aprobado como ACTIVO'),
+        backgroundColor: ctx.colors.green,
+      ),
+    );
+
+    if (memberId.toString().startsWith('local-')) return;
+
     try {
       final supabase = Supabase.instance.client;
       await supabase.from('members').update({
@@ -2192,29 +2594,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         'type': 'APROBADO',
         'name': member['name'].toString(),
       });
-
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('${member['name']} aprobado como ACTIVO'),
-          backgroundColor: ctx.colors.green,
-        ),
-      );
-      setState(() {
-        dismissedAlerts.remove('pendiente-$memberId');
-      });
       await loadMembers();
       await loadActivities();
       await _saveLocalData();
     } catch (e) {
-      debugPrint('❌ Error aprobando cliente: $e');
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: ctx.colors.red,
-        ),
-      );
+      debugPrint('⚠️ Aprobación solo local: $e');
     }
   }
 
@@ -2237,7 +2621,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             'assigned_routine_id': routineId,
           }).eq('id', memberId);
         } catch (e) {
-          debugPrint('⚠️ Error asignando en Supabase: $e');
+          debugPrint('⚠️ Error asignando: $e');
         }
       }
 
@@ -2269,234 +2653,28 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       );
     } catch (e) {
       debugPrint('❌ Error asignando rutina: $e');
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: ctx.colors.red,
-        ),
-      );
     }
   }
 
-  Future<void> clientMarkEntry() async {
-    if (loggedClient == null) return;
-    await _clientCheckin('ENTRADA');
+  List<Map<String, dynamic>> _classesToday() {
+    final now = DateTime.now();
+    final dayNames = [
+      'LUNES',
+      'MARTES',
+      'MIÉRCOLES',
+      'JUEVES',
+      'VIERNES',
+      'SÁBADO',
+      'DOMINGO'
+    ];
+    final today = dayNames[(now.weekday - 1).clamp(0, 6)];
+    return classes.where((c) => c['day'] == today).toList()
+      ..sort((a, b) => a['time'].toString().compareTo(b['time'].toString()));
   }
 
-  Future<void> clientMarkExit() async {
-    if (loggedClient == null) return;
-    await _clientCheckin('SALIDA');
-  }
-
-  Future<void> _clientCheckin(String type) async {
-    final client = loggedClient!;
-    final memberId = client['id'];
-    final memberName = client['name'].toString();
-    if (!mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final ctx = context;
-
-    try {
-      final supabase = Supabase.instance.client;
-      await supabase.from('checkins').insert({
-        'member_id': memberId,
-        'type': type,
-        'authorized': true,
-        'reason': null,
-      });
-      await supabase.from('activities').insert({
-        'type': type,
-        'name': memberName,
-      });
-
-      if (type == 'ENTRADA') {
-        final currentAttendance = (client['attendance'] as num?)?.toInt() ?? 0;
-        await supabase.from('members').update({
-          'attendance': currentAttendance + 1,
-          'last_visit': _formatDate(DateTime.now()),
-        }).eq('id', memberId);
-
-        if (!mounted) return;
-        setState(() {
-          loggedClient!['attendance'] = currentAttendance + 1;
-          loggedClient!['lastVisit'] = _formatDate(DateTime.now());
-          inside++;
-          clientInsideCount++;
-        });
-        await loadClientStreak();
-      } else {
-        if (!mounted) return;
-        setState(() {
-          if (clientInsideCount > 0) clientInsideCount--;
-        });
-      }
-
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(type == 'ENTRADA'
-              ? '¡Entrada registrada! Bienvenido 💪'
-              : '¡Salida registrada! Hasta pronto 👋'),
-          backgroundColor: ctx.colors.green,
-        ),
-      );
-      await loadActivities();
-      await loadCheckins();
-      await loadClientAforo();
-      await _saveLocalData();
-    } catch (e) {
-      debugPrint('❌ Error checkin cliente: $e');
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: ctx.colors.red,
-        ),
-      );
-    }
-  }
-
-  void registerExit() {
-    if (inside <= 0) return;
-    setState(() => inside--);
-    addActivity('SALIDA', 'Acceso registrado');
-    _saveLocalData();
-    if (!mounted) return;
-    final ctx = context;
-    ScaffoldMessenger.of(ctx).showSnackBar(
-      const SnackBar(content: Text('Salida registrada correctamente')),
-    );
-  }
-
-  void showAccessScanner() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetContext) {
-        return Container(
-          height: MediaQuery.of(sheetContext).size.height * 0.85,
-          decoration: BoxDecoration(
-            color: sheetContext.colors.bg,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            children: [
-              Container(
-                margin: const EdgeInsets.only(top: 12),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: sheetContext.colors.muted.withValues(alpha: .4),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  children: [
-                    Icon(Icons.qr_code_scanner_rounded,
-                        color: sheetContext.colors.red),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'ESCANEAR ACCESO',
-                        style: TextStyle(
-                          color: sheetContext.colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(sheetContext),
-                      icon: Icon(Icons.close_rounded,
-                          color: sheetContext.colors.muted),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(20),
-                  child: MobileScanner(
-                    onDetect: (capture) async {
-                      final barcodes = capture.barcodes;
-                      if (barcodes.isEmpty) return;
-                      final code = barcodes.first.rawValue;
-                      if (code == null || code.isEmpty) return;
-                      Navigator.pop(sheetContext);
-                      await _processScannedCode(code);
-                    },
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  'Apunta el código QR del cliente al centro',
-                  style: TextStyle(
-                    color: sheetContext.colors.muted,
-                    fontSize: 12,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _processScannedCode(String code) async {
-    Map<String, dynamic>? found;
-    for (final m in members) {
-      if (m['qrCode'].toString() == code) {
-        found = m;
-        break;
-      }
-    }
-    if (!mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final ctx = context;
-
-    if (found == null) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: const Text('❌ Código no reconocido'),
-          backgroundColor: ctx.colors.red,
-        ),
-      );
-      return;
-    }
-
-    final status = found['status'].toString().toUpperCase();
-    if (status != 'ACTIVO') {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('⛔ ${found['name']} no está ACTIVO ($status)'),
-          backgroundColor: ctx.colors.red,
-        ),
-      );
-      addActivity('BLOQUEADO', found['name'].toString());
-      return;
-    }
-
-    setState(() => inside++);
-    addActivity('ENTRADA', found['name'].toString());
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text('✅ Acceso permitido: ${found['name']}'),
-        backgroundColor: ctx.colors.green,
-      ),
-    );
-    await _saveLocalData();
-  }
-
-  // ── INIT / DISPOSE ──
+  // ═══════════════════════════════════════════════════════════
+  // INIT / DISPOSE
+  // ═══════════════════════════════════════════════════════════
   @override
   void initState() {
     super.initState();
@@ -2534,7 +2712,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   // ═══════════════════════════════════════════════════════════
-  // LOGIN REDISEÑADO — PROFESIONAL
+  // LOGIN
   // ═══════════════════════════════════════════════════════════
   Widget _loginScreen() {
     return Scaffold(
@@ -2901,34 +3079,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     color: context.colors.muted,
                     fontSize: 13,
                     height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: context.colors.purple.withValues(alpha: .10),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: context.colors.purple.withValues(alpha: .30),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.info_outline_rounded,
-                          color: context.colors.purple, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'Vuelve e ingresa con tu cédula cuando esté activa.',
-                          style: TextStyle(
-                            color: context.colors.white,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ],
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -3439,7 +3589,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CLIENT HOME ──
+  // ═══════════════════════════════════════════════════════════
+  // CLIENT HOME
+  // ═══════════════════════════════════════════════════════════
   Widget _clientHome() {
     final client = loggedClient;
     if (client == null) {
@@ -3452,153 +3604,127 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       );
     }
 
+    final name = client['name']?.toString() ?? 'Cliente';
     final routineName = client['assignedRoutine']?.toString() ?? '';
+    final status = (client['status']?.toString() ?? 'ACTIVO').toUpperCase();
+    final isBlocked = status != 'ACTIVO';
+    final statusColor = isBlocked ? context.colors.red : context.colors.green;
+    final plan = client['plan']?.toString() ?? '—';
+    final expiry = client['expiry']?.toString() ?? '—';
+    final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
+    final qrCode = client['qrCode']?.toString() ?? '';
+    final todayClasses = _classesToday();
 
     return Scaffold(
       backgroundColor: context.colors.bg,
-      appBar: AppBar(
-        backgroundColor: context.colors.bg,
-        elevation: 0,
-        title: Text(
-          'Hola, ${client['name']}',
-          style: TextStyle(
-              color: context.colors.white, fontWeight: FontWeight.w900),
-        ),
-        actions: [
-          IconButton(
-            onPressed: () =>
-                openGymWhatsApp(clientName: client['name']?.toString()),
-            icon: FaIcon(FontAwesomeIcons.whatsapp,
-                color: context.colors.green, size: 20),
-            tooltip: 'WhatsApp gym',
-          ),
-          IconButton(
-            onPressed: confirmLogout,
-            icon: Icon(Icons.logout_rounded, color: context.colors.red),
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: context.colors.panel,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 40),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Text('AFORO ACTUAL',
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.2,
-                      )),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Text('$clientInsideCount',
-                          style: TextStyle(
-                            color: context.colors.white,
-                            fontSize: 40,
-                            fontWeight: FontWeight.w900,
-                          )),
-                      const SizedBox(width: 12),
-                      Text('/ $clientCapacity',
-                          style: TextStyle(
-                              color: context.colors.muted, fontSize: 16)),
-                      const Spacer(),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color:
-                              clientAforoColor(context).withValues(alpha: .15),
-                          borderRadius: BorderRadius.circular(30),
-                          border: Border.all(
-                            color: clientAforoColor(context)
-                                .withValues(alpha: .45),
-                          ),
-                        ),
-                        child: Text(
-                          clientAforoStatus,
-                          style: TextStyle(
-                            color: clientAforoColor(context),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
+                  Container(
+                    width: 54,
+                    height: 54,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [context.colors.purple, context.colors.red],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                    ],
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: context.colors.purple.withValues(alpha: .35),
+                          blurRadius: 18,
+                        ),
+                      ],
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      name.isEmpty ? '?' : name[0].toUpperCase(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: context.colors.panel,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.local_fire_department_rounded,
-                      color: context.colors.orange, size: 36),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('RACHA',
+                        Text('Hola,',
                             style: TextStyle(
                               color: context.colors.muted,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.2,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
                             )),
-                        const SizedBox(height: 4),
-                        Text(
-                          '$clientStreak ${clientStreak == 1 ? "día" : "días"}',
-                          style: TextStyle(
-                            color: context.colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
+                        const SizedBox(height: 2),
+                        Text(name,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: -0.3,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis),
                       ],
                     ),
                   ),
+                  IconButton(
+                    onPressed: confirmLogout,
+                    icon: Icon(Icons.logout_rounded,
+                        color: context.colors.red, size: 22),
+                  ),
                 ],
               ),
-            ),
-            const SizedBox(height: 16),
-            if (routineName.isNotEmpty) ...[
+              const SizedBox(height: 20),
               Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   color: context.colors.panel,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: context.colors.purple.withValues(alpha: .35)),
+                    color: statusColor.withValues(alpha: .35),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: statusColor.withValues(alpha: .12),
+                      blurRadius: 20,
+                    ),
+                  ],
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.fitness_center_rounded,
-                        color: context.colors.purple, size: 30),
+                    Container(
+                      width: 50,
+                      height: 50,
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                            color: statusColor.withValues(alpha: .35)),
+                      ),
+                      child: Icon(
+                        isBlocked
+                            ? Icons.block_rounded
+                            : Icons.verified_rounded,
+                        color: statusColor,
+                        size: 26,
+                      ),
+                    ),
                     const SizedBox(width: 14),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('MI RUTINA ASIGNADA',
+                          Text('MI MEMBRESÍA',
                               style: TextStyle(
                                 color: context.colors.muted,
                                 fontSize: 10,
@@ -3606,79 +3732,558 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 letterSpacing: 1.2,
                               )),
                           const SizedBox(height: 4),
-                          Text(
-                            routineName,
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
+                          Text(plan,
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                              )),
+                          const SizedBox(height: 2),
+                          Text('Vence: $expiry',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 11,
+                              )),
                         ],
                       ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(
+                            color: statusColor.withValues(alpha: .45)),
+                      ),
+                      child: Text(status,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1,
+                          )),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 16),
-            ],
-            Row(
-              children: [
-                Expanded(
-                  child: _primaryButton(
-                    text: 'MARCAR ENTRADA',
-                    color: context.colors.green,
-                    onTap: clientMarkEntry,
-                    darkText: true,
+              _bigScanButton(),
+              const SizedBox(height: 16),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: requestRenewal,
+                  child: Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          context.colors.yellow.withValues(alpha: .18),
+                          context.colors.orange.withValues(alpha: .12),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: context.colors.yellow.withValues(alpha: .45),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: context.colors.yellow.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color:
+                                  context.colors.yellow.withValues(alpha: .40),
+                            ),
+                          ),
+                          child: Icon(Icons.autorenew_rounded,
+                              color: context.colors.yellow, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('RENOVAR MEMBRESÍA',
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.5,
+                                  )),
+                              const SizedBox(height: 3),
+                              Text('Solicita renovación al gimnasio',
+                                  style: TextStyle(
+                                    color: context.colors.muted,
+                                    fontSize: 11,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.arrow_forward_ios_rounded,
+                            color: context.colors.yellow, size: 16),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _primaryButton(
-                    text: 'MARCAR SALIDA',
-                    color: context.colors.yellow,
-                    onTap: clientMarkExit,
-                    darkText: true,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: context.colors.panel,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: context.colors.border),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              const SizedBox(height: 16),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: () => openGymWhatsApp(clientName: name),
+                  child: Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: context.colors.panel,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: context.colors.green.withValues(alpha: .40),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: context.colors.green.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color:
+                                  context.colors.green.withValues(alpha: .40),
+                            ),
+                          ),
+                          child: FaIcon(FontAwesomeIcons.whatsapp,
+                              color: context.colors.green, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('CONTACTAR GIMNASIO',
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.5,
+                                  )),
+                              const SizedBox(height: 3),
+                              Text('Escríbenos por WhatsApp',
+                                  style: TextStyle(
+                                    color: context.colors.muted,
+                                    fontSize: 11,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.arrow_forward_ios_rounded,
+                            color: context.colors.green, size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
                 children: [
-                  Text('MI MEMBRESÍA',
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.local_fire_department_rounded,
+                      color: context.colors.orange,
+                      value: '$clientStreak',
+                      label: clientStreak == 1 ? 'Día racha' : 'Días racha',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.event_available_rounded,
+                      color: context.colors.purple,
+                      value: '$attendance',
+                      label: 'Asistencias',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.qr_code_rounded,
+                      color: context.colors.green,
+                      value: '$clientInsideCount',
+                      label: 'Dentro ahora',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              Container(
+                padding: const EdgeInsets.all(22),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(
+                    color: context.colors.purple.withValues(alpha: .35),
+                    width: 1.5,
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.qr_code_2_rounded,
+                            color: context.colors.purple, size: 20),
+                        const SizedBox(width: 8),
+                        Text('MI QR PERSONAL',
+                            style: TextStyle(
+                              color: context.colors.purple,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.2,
+                            )),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: QrImageView(
+                        data: qrCode,
+                        size: 180,
+                        backgroundColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      qrCode,
                       style: TextStyle(
                         color: context.colors.muted,
                         fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Muestra este QR al gimnasio si lo necesitas.',
+                      textAlign: TextAlign.center,
+                      style:
+                          TextStyle(color: context.colors.muted, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Icon(Icons.event_rounded,
+                      color: context.colors.cyan, size: 18),
+                  const SizedBox(width: 8),
+                  Text('CLASES DE HOY',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 13,
                         fontWeight: FontWeight.w900,
-                        letterSpacing: 1.2,
+                        letterSpacing: 1,
                       )),
-                  const SizedBox(height: 12),
-                  _infoRow('Plan', client['plan'].toString()),
-                  const SizedBox(height: 8),
-                  _infoRow('Vence', client['expiry'].toString()),
-                  const SizedBox(height: 8),
-                  _infoRow('Estado', client['status'].toString()),
-                  const SizedBox(height: 8),
-                  _infoRow('Asistencia', '${client['attendance']} visitas'),
                 ],
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              if (todayClasses.isEmpty)
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Center(
+                    child: Text('No hay clases programadas hoy',
+                        style: TextStyle(
+                            color: context.colors.muted, fontSize: 12)),
+                  ),
+                )
+              else
+                ...todayClasses.map((c) => _classTodayCard(c)),
+              const SizedBox(height: 24),
+              if (routineName.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Icon(Icons.fitness_center_rounded,
+                        color: context.colors.purple, size: 18),
+                    const SizedBox(width: 8),
+                    Text('MI RUTINA',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        )),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: context.colors.purple.withValues(alpha: .35),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: context.colors.purple.withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: context.colors.purple.withValues(alpha: .35),
+                          ),
+                        ),
+                        child: Icon(Icons.fitness_center_rounded,
+                            color: context.colors.purple, size: 26),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(routineName,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w900,
+                            )),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 20),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  // ── CRUD MIEMBROS ──
+  Widget _bigScanButton() {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: openClientQrScanner,
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                context.colors.green,
+                context.colors.green.withValues(alpha: .65),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: context.colors.green.withValues(alpha: .40),
+                blurRadius: 30,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: .20),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: const Icon(Icons.qr_code_scanner_rounded,
+                    color: Colors.black, size: 34),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'ESCANEAR ACCESO',
+                      style: TextStyle(
+                        color: Colors.black.withValues(alpha: .85),
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Escanea el QR del gimnasio para entrar o salir',
+                      style: TextStyle(
+                        color: Colors.black.withValues(alpha: .65),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.arrow_forward_rounded,
+                  color: Colors.black.withValues(alpha: .75), size: 24),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _clientStatCard({
+    required IconData icon,
+    required Color color,
+    required String value,
+    required String label,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(height: 8),
+          Text(value,
+              style: TextStyle(
+                color: context.colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                height: 1,
+              )),
+          const SizedBox(height: 4),
+          Text(label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: context.colors.muted,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+              )),
+        ],
+      ),
+    );
+  }
+
+  Widget _classTodayCard(Map<String, dynamic> c) {
+    Color color = context.colors.purple;
+    for (final ct in classTypes) {
+      if (ct['name'].toString().toUpperCase() ==
+          c['type'].toString().toUpperCase()) {
+        color = Color(ct['color'] as int);
+        break;
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: .35), width: 1.2),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 55,
+            height: 55,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .15),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withValues(alpha: .35)),
+            ),
+            alignment: Alignment.center,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(c['time'].toString(),
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                    )),
+              ],
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(c['name'].toString(),
+                    style: TextStyle(
+                      color: context.colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w900,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(Icons.person_rounded,
+                        color: context.colors.muted, size: 12),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(c['trainer'].toString(),
+                          style: TextStyle(
+                              color: context.colors.muted, fontSize: 11),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Icon(Icons.room_rounded,
+                        color: context.colors.muted, size: 12),
+                    const SizedBox(width: 4),
+                    Text(c['room'].toString(),
+                        style: TextStyle(
+                            color: context.colors.muted, fontSize: 11)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CRUD MIEMBROS
+  // ═══════════════════════════════════════════════════════════
   void addMember() {
     final name = TextEditingController();
     final phone = TextEditingController();
@@ -4024,7 +4629,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD PAGOS ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD PAGOS
+  // ═══════════════════════════════════════════════════════════
   void newPayment() {
     if (members.isEmpty) {
       final ctx = context;
@@ -4173,7 +4780,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD PLANES ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD PLANES
+  // ═══════════════════════════════════════════════════════════
   void addPlan() {
     final name = TextEditingController();
     final price = TextEditingController();
@@ -4404,7 +5013,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD RUTINAS ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD RUTINAS
+  // ═══════════════════════════════════════════════════════════
   void addRoutine() {
     final name = TextEditingController();
     final duration = TextEditingController(text: '45');
@@ -4886,7 +5497,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD EJERCICIOS ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD EJERCICIOS
+  // ═══════════════════════════════════════════════════════════
   void addExercise() {
     final name = TextEditingController();
     final sets = TextEditingController(text: '3');
@@ -5166,7 +5779,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD ENTRENADORES ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD ENTRENADORES
+  // ═══════════════════════════════════════════════════════════
   void addTrainer() {
     final name = TextEditingController();
     final specialty = TextEditingController();
@@ -5470,7 +6085,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD TIPOS DE CLASE ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD TIPOS DE CLASE
+  // ═══════════════════════════════════════════════════════════
   void addClassType() {
     final name = TextEditingController();
     int selectedColor = 0xFFB000FF;
@@ -5936,7 +6553,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CRUD CLASES ──
+  // ═══════════════════════════════════════════════════════════
+  // CRUD CLASES
+  // ═══════════════════════════════════════════════════════════
   void addClass() {
     final name = TextEditingController();
     final capacityCtrl = TextEditingController(text: '20');
@@ -6269,6 +6888,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // MOBILE DRAWER
+  // ═══════════════════════════════════════════════════════════
   Widget _mobileDrawer() {
     final items = [
       [Icons.grid_view_rounded, 'Command Center'],
@@ -6345,7 +6967,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 itemBuilder: (context, index) {
                   final selected = index == _section;
                   final isAlerts = index == 6;
-                  final ac = alertCount(context);
+                  final ac = alertCount(context) + renewalRequests.length;
                   return Padding(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
@@ -6498,6 +7120,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // DESKTOP
+  // ═══════════════════════════════════════════════════════════
   Widget _desktop() {
     return Row(
       children: [
@@ -6576,7 +7201,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               itemBuilder: (context, index) {
                 final selected = index == _section;
                 final isAlerts = index == 6;
-                final ac = alertCount(context);
+                final ac = alertCount(context) + renewalRequests.length;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Material(
@@ -6705,7 +7330,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _header() {
-    final ac = alertCount(context);
+    final ac = alertCount(context) + renewalRequests.length;
     return Container(
       height: 78,
       padding: const EdgeInsets.symmetric(horizontal: 28),
@@ -6734,19 +7359,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ],
             ),
           ),
-          IconButton(
-            onPressed: () => themeController.toggle(),
-            icon: Icon(
-              themeController.isDark
-                  ? Icons.light_mode_rounded
-                  : Icons.dark_mode_rounded,
-              color: context.colors.yellow,
-            ),
-            tooltip: themeController.isDark
-                ? 'Cambiar a modo claro'
-                : 'Cambiar a modo oscuro',
-          ),
-          const SizedBox(width: 4),
           IconButton(
             onPressed: () => loadAllData(),
             icon: Icon(Icons.refresh_rounded, color: context.colors.green),
@@ -6835,16 +7447,26 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _content() {
+    final isMobile = MediaQuery.of(context).size.width < 850;
     if (_section == 1) return _clientsPage();
-    if (_section == 2) return _qrCenter();
-    if (_section == 3) return _plansPage();
+    if (_section == 2) {
+      return isMobile ? _qrCenterMobile() : _qrCenter();
+    }
+    if (_section == 3) {
+      return isMobile ? _plansPageMobile() : _plansPage();
+    }
     if (_section == 4) return _financePage();
     if (_section == 5) return _trainingPage();
-    if (_section == 6) return _alertsPage();
+    if (_section == 6) {
+      return isMobile ? _alertsPageMobile() : _alertsPage();
+    }
     if (_section == 7) return _currencyPage();
     return _dashboardContent();
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // NOTIFICACIONES
+  // ═══════════════════════════════════════════════════════════
   void showNotifications() {
     showModalBottomSheet(
       context: context,
@@ -6854,6 +7476,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         return StatefulBuilder(
           builder: (sheetContext, setModalState) {
             final alerts = activeAlerts(sheetContext);
+            final renewals =
+                renewalRequests.where((r) => r['read'] != true).toList();
+
             return Container(
               margin: EdgeInsets.only(
                   top: MediaQuery.of(sheetContext).padding.top + 40),
@@ -6905,9 +7530,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                   )),
                               const SizedBox(height: 2),
                               Text(
-                                alerts.isEmpty
+                                (alerts.length + renewals.length) == 0
                                     ? 'Todo en orden'
-                                    : '${alerts.length} ${alerts.length == 1 ? "pendiente" : "pendientes"}',
+                                    : '${alerts.length + renewals.length} pendientes',
                                 style: TextStyle(
                                   color: sheetContext.colors.muted,
                                   fontSize: 11,
@@ -6928,9 +7553,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
                         maxHeight:
-                            MediaQuery.of(sheetContext).size.height * 0.6,
+                            MediaQuery.of(sheetContext).size.height * 0.65,
                       ),
-                      child: alerts.isEmpty
+                      child: (alerts.isEmpty && renewals.isEmpty)
                           ? Padding(
                               padding: const EdgeInsets.all(40),
                               child: Center(
@@ -6956,25 +7581,86 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 ),
                               ),
                             )
-                          : ListView.builder(
+                          : ListView(
                               shrinkWrap: true,
                               padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                              itemCount: alerts.length,
-                              itemBuilder: (_, i) {
-                                final alert = alerts[i];
-                                final color = alert['color'] as Color;
-                                final icon = alert['icon'] as IconData;
-                                return Container(
-                                  margin: const EdgeInsets.only(bottom: 10),
-                                  padding: const EdgeInsets.all(14),
-                                  decoration: BoxDecoration(
-                                    color: sheetContext.colors.panel,
-                                    borderRadius: BorderRadius.circular(16),
-                                    border: Border.all(
-                                        color: color.withValues(alpha: .25)),
-                                  ),
-                                  child: Row(
-                                    children: [
+                              children: [
+                                ...renewals.map((r) => Container(
+                                      margin: const EdgeInsets.only(bottom: 10),
+                                      padding: const EdgeInsets.all(14),
+                                      decoration: BoxDecoration(
+                                        color: sheetContext.colors.panel,
+                                        borderRadius: BorderRadius.circular(16),
+                                        border: Border.all(
+                                          color: sheetContext.colors.yellow
+                                              .withValues(alpha: .40),
+                                        ),
+                                      ),
+                                      child: Row(children: [
+                                        Container(
+                                          width: 42,
+                                          height: 42,
+                                          decoration: BoxDecoration(
+                                            color: sheetContext.colors.yellow
+                                                .withValues(alpha: .12),
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                          ),
+                                          child: Icon(Icons.autorenew_rounded,
+                                              color: sheetContext.colors.yellow,
+                                              size: 20),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(r['name'].toString(),
+                                                  style: TextStyle(
+                                                    color: sheetContext
+                                                        .colors.white,
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w800,
+                                                  )),
+                                              const SizedBox(height: 3),
+                                              Text(
+                                                  'Solicitó renovación · ${r['plan']}',
+                                                  style: TextStyle(
+                                                    color: sheetContext
+                                                        .colors.muted,
+                                                    fontSize: 11,
+                                                  )),
+                                            ],
+                                          ),
+                                        ),
+                                        IconButton(
+                                          onPressed: () {
+                                            setState(() {
+                                              r['read'] = true;
+                                            });
+                                            _saveLocalData();
+                                            setModalState(() {});
+                                          },
+                                          icon: Icon(Icons.close_rounded,
+                                              color: sheetContext.colors.muted,
+                                              size: 18),
+                                        ),
+                                      ]),
+                                    )),
+                                ...alerts.map((alert) {
+                                  final color = alert['color'] as Color;
+                                  final icon = alert['icon'] as IconData;
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 10),
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: sheetContext.colors.panel,
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                          color: color.withValues(alpha: .25)),
+                                    ),
+                                    child: Row(children: [
                                       Container(
                                         width: 42,
                                         height: 42,
@@ -6992,28 +7678,26 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                           crossAxisAlignment:
                                               CrossAxisAlignment.start,
                                           children: [
-                                            Text(
-                                              alert['title'].toString(),
-                                              style: TextStyle(
-                                                color:
-                                                    sheetContext.colors.white,
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w800,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
+                                            Text(alert['title'].toString(),
+                                                style: TextStyle(
+                                                  color:
+                                                      sheetContext.colors.white,
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow.ellipsis),
                                             const SizedBox(height: 3),
-                                            Text(
-                                              alert['subtitle'].toString(),
-                                              style: TextStyle(
-                                                color:
-                                                    sheetContext.colors.muted,
-                                                fontSize: 11,
-                                              ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                            ),
+                                            Text(alert['subtitle'].toString(),
+                                                style: TextStyle(
+                                                  color:
+                                                      sheetContext.colors.muted,
+                                                  fontSize: 11,
+                                                ),
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow.ellipsis),
                                           ],
                                         ),
                                       ),
@@ -7025,18 +7709,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                         icon: Icon(Icons.close_rounded,
                                             color: sheetContext.colors.muted,
                                             size: 18),
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(
-                                            minWidth: 32, minHeight: 32),
                                       ),
-                                    ],
-                                  ),
-                                );
-                              },
+                                    ]),
+                                  );
+                                }),
+                              ],
                             ),
                     ),
                   ),
-                  if (alerts.isNotEmpty)
+                  if (alerts.isNotEmpty || renewals.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
                       child: SizedBox(
@@ -7076,6 +7757,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // DASHBOARD
+  // ═══════════════════════════════════════════════════════════
   Widget _dashboardContent() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -7300,53 +7984,49 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               children: activities.take(5).map((a) {
                 Color color = context.colors.purple;
                 if (a['type'] == 'ENTRADA') color = context.colors.green;
+                if (a['type'] == 'SALIDA') color = context.colors.cyan;
                 if (a['type'] == 'PAGO') color = context.colors.yellow;
+                if (a['type'] == 'BLOQUEADO') color = context.colors.red;
+                if (a['type'] == 'RENOVACIÓN') color = context.colors.orange;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: () {},
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4, vertical: 10),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 42,
-                              height: 42,
-                              decoration: BoxDecoration(
-                                color: color.withValues(alpha: .10),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Icon(Icons.bolt_rounded, color: color),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(a['name'] ?? '',
-                                      style: TextStyle(
-                                        color: context.colors.white,
-                                        fontWeight: FontWeight.w800,
-                                        fontSize: 13,
-                                      )),
-                                  const SizedBox(height: 2),
-                                  Text(a['type'] ?? '',
-                                      style: TextStyle(
-                                          color: context.colors.muted,
-                                          fontSize: 11)),
-                                ],
-                              ),
-                            ),
-                            Text(a['time'] ?? '',
-                                style: TextStyle(
-                                    color: context.colors.muted, fontSize: 11)),
-                          ],
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            color: color.withValues(alpha: .10),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(Icons.bolt_rounded, color: color),
                         ),
-                      ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(a['name'] ?? '',
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13,
+                                  )),
+                              const SizedBox(height: 2),
+                              Text(a['type'] ?? '',
+                                  style: TextStyle(
+                                      color: context.colors.muted,
+                                      fontSize: 11)),
+                            ],
+                          ),
+                        ),
+                        Text(a['time'] ?? '',
+                            style: TextStyle(
+                                color: context.colors.muted, fontSize: 11)),
+                      ],
                     ),
                   ),
                 );
@@ -7565,6 +8245,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // ENTRENAMIENTO (DESKTOP)
+  // ═══════════════════════════════════════════════════════════
   Widget _trainingPage() {
     final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'TIPOS', 'HORARIO'];
 
@@ -8590,7 +9273,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── CLIENTES ──
+  // ═══════════════════════════════════════════════════════════
+  // CLIENTES
+  // ═══════════════════════════════════════════════════════════
   Widget _clientsPage() {
     final isMobile = MediaQuery.of(context).size.width < 850;
     if (isMobile) return _clientsPageMobile();
@@ -8767,59 +9452,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   padding: const EdgeInsets.only(bottom: 10),
                   child: _clientRowMobile(m),
                 )),
-        ],
-      ),
-    );
-  }
-
-  Widget _clientStatCard({
-    required IconData icon,
-    required Color color,
-    required String value,
-    required String label,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.colors.cardBg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.white.withValues(alpha: .05)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: .14),
-              borderRadius: BorderRadius.circular(11),
-            ),
-            child: Icon(icon, color: color, size: 18),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(value,
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      height: 1,
-                    )),
-                const SizedBox(height: 3),
-                Text(label,
-                    style: TextStyle(
-                      color: context.colors.muted,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -9312,7 +9944,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── QR CENTER ──
+  // ═══════════════════════════════════════════════════════════
+  // QR CENTER (ADMIN DESKTOP)
+  // ═══════════════════════════════════════════════════════════
   Widget _qrCenter() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -9835,7 +10469,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── PLANES ──
+  // ═══════════════════════════════════════════════════════════
+  // PLANES
+  // ═══════════════════════════════════════════════════════════
   Widget _plansPage() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -10312,7 +10948,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     ]);
   }
 
-  // ── FINANZAS ──
+  // ═══════════════════════════════════════════════════════════
+  // FINANZAS
+  // ═══════════════════════════════════════════════════════════
   Widget _financePage() {
     final isMobile = MediaQuery.of(context).size.width < 850;
     if (isMobile) return _financePageMobile();
@@ -11307,7 +11945,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _lineChart() {
-    final maxVal = monthlyIncome.reduce((a, b) => a > b ? a : b);
+    final maxVal = monthlyIncome.isEmpty
+        ? 0.0
+        : monthlyIncome.reduce((a, b) => a > b ? a : b);
     final maxY = maxVal == 0 ? 100.0 : maxVal * 1.2;
     return LineChart(LineChartData(
       gridData: FlGridData(
@@ -11394,8 +12034,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _barChart() {
+    final allValues = [...weeklyIncome, ...weeklyExpense];
     final maxVal =
-        [...weeklyIncome, ...weeklyExpense].reduce((a, b) => a > b ? a : b);
+        allValues.isEmpty ? 0.0 : allValues.reduce((a, b) => a > b ? a : b);
     final maxY = maxVal == 0 ? 100.0 : maxVal * 1.3;
     return BarChart(BarChartData(
       alignment: BarChartAlignment.spaceAround,
@@ -11494,7 +12135,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     ));
   }
 
-  // ── CONFIGURACIÓN ──
+  // ═══════════════════════════════════════════════════════════
+  // CONFIGURACIÓN
+  // ═══════════════════════════════════════════════════════════
   Widget _currencyPage() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -11509,11 +12152,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 letterSpacing: 1,
               )),
           const SizedBox(height: 6),
-          Text('Personaliza WhatsApp, PIN de admin, monedas y preferencias.',
+          Text(
+              'Personaliza WhatsApp, PIN, monedas y preferencias del gimnasio.',
               style: TextStyle(color: context.colors.muted, fontSize: 13)),
           const SizedBox(height: 26),
-
-          // ── WHATSAPP DEL GIMNASIO ──
           _card(
             title: 'WHATSAPP DEL GIMNASIO',
             child: Column(
@@ -11523,13 +12165,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     style:
                         TextStyle(color: context.colors.muted, fontSize: 11)),
                 const SizedBox(height: 14),
-                TextField(
-                  controller: TextEditingController(text: gymPhone),
-                  keyboardType: TextInputType.phone,
-                  style: TextStyle(color: context.colors.white),
+                _GymPhoneField(
+                  initialValue: gymPhone,
                   onChanged: (v) => setState(() => gymPhone = v),
-                  decoration: _inputDecoration(context, 'Ej: +58 412 1234567',
-                      prefixIcon: Icons.phone_rounded),
                 ),
                 const SizedBox(height: 14),
                 SizedBox(
@@ -11565,18 +12203,18 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ],
             ),
           ),
-
           const SizedBox(height: 20),
-
-          // ── CAMBIAR PIN DE ADMIN (NUEVO) ──
           _card(
             title: 'PIN DE ADMINISTRADOR',
-            child: _changePinSection(),
+            child: _ChangePinSection(
+              adminPin: adminPin,
+              onPinChanged: (newPin) async {
+                setState(() => adminPin = newPin);
+                await _saveLocalData();
+              },
+            ),
           ),
-
           const SizedBox(height: 20),
-
-          // ── MONEDA PRINCIPAL ──
           _card(
             title: 'MONEDA PRINCIPAL',
             child: Column(
@@ -11588,8 +12226,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     color: Colors.transparent,
                     child: InkWell(
                       borderRadius: BorderRadius.circular(13),
-                      onTap: () =>
-                          setState(() => selectedCurrency = c['code']!),
+                      onTap: () async {
+                        setState(() => selectedCurrency = c['code']!);
+                        await _saveLocalData();
+                      },
                       child: Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
@@ -11652,10 +12292,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               }).toList(),
             ),
           ),
-
           const SizedBox(height: 20),
-
-          // ── CONVERSIÓN ──
           _card(
             title: 'MOSTRAR CONVERSIÓN',
             child: Container(
@@ -11712,15 +12349,15 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 Switch(
                   value: showConversion,
                   activeColor: context.colors.green,
-                  onChanged: (value) => setState(() => showConversion = value),
+                  onChanged: (value) async {
+                    setState(() => showConversion = value);
+                    await _saveLocalData();
+                  },
                 ),
               ]),
             ),
           ),
-
           const SizedBox(height: 20),
-
-          // ── TASAS DE CAMBIO ──
           _card(
             title: 'TASAS DE CAMBIO',
             child: Column(
@@ -11730,34 +12367,42 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     style:
                         TextStyle(color: context.colors.muted, fontSize: 11)),
                 const SizedBox(height: 14),
-                _rateField(
+                _RateField(
                   label: '1 USD = ? Bs (Bolívares)',
-                  value: usdToVes,
-                  onChanged: (v) => setState(() => usdToVes = v),
+                  initialValue: usdToVes,
+                  onChanged: (v) async {
+                    setState(() => usdToVes = v);
+                    await _saveLocalData();
+                  },
                 ),
                 const SizedBox(height: 10),
-                _rateField(
+                _RateField(
                   label: '1 EUR = ? Bs (Bolívares)',
-                  value: eurToVes,
-                  onChanged: (v) => setState(() => eurToVes = v),
+                  initialValue: eurToVes,
+                  onChanged: (v) async {
+                    setState(() => eurToVes = v);
+                    await _saveLocalData();
+                  },
                 ),
                 const SizedBox(height: 10),
-                _rateField(
+                _RateField(
                   label: '1 COP = ? Bs (Bolívares)',
-                  value: copToVes,
-                  onChanged: (v) => setState(() => copToVes = v),
+                  initialValue: copToVes,
+                  onChanged: (v) async {
+                    setState(() => copToVes = v);
+                    await _saveLocalData();
+                  },
                 ),
               ],
             ),
           ),
-
           const SizedBox(height: 20),
-          _button('LISTO', context.colors.green, () {
-            _saveLocalData();
+          _button('LISTO', context.colors.green, () async {
+            await _saveLocalData();
+            if (!mounted) return;
             setState(() => _section = 0);
-            final ctx = context;
-            ScaffoldMessenger.of(ctx).showSnackBar(
-              const SnackBar(content: Text('Configuración guardada')),
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('✅ Configuración guardada')),
             );
           }, darkText: true),
           const SizedBox(height: 40),
@@ -11766,215 +12411,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── SECCIÓN CAMBIAR PIN (NUEVO) ──
-  Widget _changePinSection() {
-    final currentPinCtrl = TextEditingController();
-    final newPinCtrl = TextEditingController();
-    final confirmPinCtrl = TextEditingController();
-
-    return StatefulBuilder(
-      builder: (context, setSectionState) {
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'PIN actual configurado. Cámbialo cuando quieras.',
-              style: TextStyle(color: context.colors.muted, fontSize: 11),
-            ),
-            const SizedBox(height: 16),
-            _pinChangeField(
-              controller: currentPinCtrl,
-              label: 'PIN actual',
-              icon: Icons.lock_outline_rounded,
-            ),
-            const SizedBox(height: 10),
-            _pinChangeField(
-              controller: newPinCtrl,
-              label: 'Nuevo PIN (4 dígitos)',
-              icon: Icons.lock_open_rounded,
-            ),
-            const SizedBox(height: 10),
-            _pinChangeField(
-              controller: confirmPinCtrl,
-              label: 'Confirmar nuevo PIN',
-              icon: Icons.verified_user_rounded,
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () async {
-                  final current = currentPinCtrl.text.trim();
-                  final newPin = newPinCtrl.text.trim();
-                  final confirm = confirmPinCtrl.text.trim();
-
-                  final ctx = context;
-
-                  if (current != adminPin) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(
-                        content: const Text('PIN actual incorrecto'),
-                        backgroundColor: ctx.colors.red,
-                      ),
-                    );
-                    return;
-                  }
-                  if (!RegExp(r'^\d{4}$').hasMatch(newPin)) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(
-                        content: const Text(
-                            'El nuevo PIN debe tener exactamente 4 dígitos'),
-                        backgroundColor: ctx.colors.yellow,
-                      ),
-                    );
-                    return;
-                  }
-                  if (newPin != confirm) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(
-                        content: const Text('Los PIN nuevos no coinciden'),
-                        backgroundColor: ctx.colors.red,
-                      ),
-                    );
-                    return;
-                  }
-                  if (newPin == current) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(
-                        content: const Text(
-                            'El nuevo PIN debe ser distinto al actual'),
-                        backgroundColor: ctx.colors.yellow,
-                      ),
-                    );
-                    return;
-                  }
-
-                  setState(() => adminPin = newPin);
-                  await _saveLocalData();
-
-                  currentPinCtrl.clear();
-                  newPinCtrl.clear();
-                  confirmPinCtrl.clear();
-                  setSectionState(() {});
-
-                  if (mounted) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(
-                        content: const Text('✅ PIN actualizado correctamente'),
-                        backgroundColor: ctx.colors.green,
-                      ),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.save_rounded, size: 18),
-                label: const Text('ACTUALIZAR PIN',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w900,
-                      fontSize: 12,
-                    )),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: context.colors.red,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: context.colors.yellow.withValues(alpha: .08),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                    color: context.colors.yellow.withValues(alpha: .30)),
-              ),
-              child: Row(children: [
-                Icon(Icons.info_outline_rounded,
-                    color: context.colors.yellow, size: 16),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Si olvidas el PIN, bórralo desde SharedPreferences o reinstala la app.',
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ]),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _pinChangeField({
-    required TextEditingController controller,
-    required String label,
-    required IconData icon,
-  }) {
-    return TextField(
-      controller: controller,
-      obscureText: true,
-      keyboardType: TextInputType.number,
-      maxLength: 4,
-      style: TextStyle(
-        color: context.colors.white,
-        fontSize: 16,
-        letterSpacing: 8,
-        fontWeight: FontWeight.w900,
-      ),
-      decoration: InputDecoration(
-        counterText: '',
-        labelText: label,
-        labelStyle: TextStyle(
-          color: context.colors.muted,
-          fontSize: 12,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0,
-        ),
-        prefixIcon: Icon(icon, color: context.colors.red, size: 20),
-        filled: true,
-        fillColor: context.colors.panel2,
-        contentPadding:
-            const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(color: context.colors.border, width: 1.5),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(color: context.colors.red, width: 2),
-        ),
-      ),
-    );
-  }
-
-  Widget _rateField({
-    required String label,
-    required double value,
-    required ValueChanged<double> onChanged,
-  }) {
-    final controller = TextEditingController(text: value.toString());
-    return TextField(
-      controller: controller,
-      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-      style: TextStyle(color: context.colors.white),
-      onChanged: (text) {
-        final v = double.tryParse(text.replaceAll(',', '.'));
-        if (v != null && v > 0) onChanged(v);
-      },
-      decoration: _inputDecoration(context, label),
-    );
-  }
-
-  // ── ALERTAS ──
+  // ═══════════════════════════════════════════════════════════
+  // ALERTAS (DESKTOP)
+  // ═══════════════════════════════════════════════════════════
   Widget _alertsPage() {
     final filtered = filteredAlerts(context);
+    final renewals = renewalRequests.where((r) => r['read'] != true).toList();
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -11999,7 +12442,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 ],
               ),
             ),
-            if (alertCount(context) > 0)
+            if ((alertCount(context) + renewals.length) > 0)
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -12019,7 +12462,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Text('${alertCount(context)} pendientes',
+                  Text('${alertCount(context) + renewals.length} pendientes',
                       style: TextStyle(
                         color: context.colors.red,
                         fontSize: 12,
@@ -12029,6 +12472,18 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ),
           ]),
           const SizedBox(height: 24),
+          if (renewals.isNotEmpty) ...[
+            Text('SOLICITUDES DE RENOVACIÓN',
+                style: TextStyle(
+                  color: context.colors.yellow,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                )),
+            const SizedBox(height: 12),
+            ...renewals.map((r) => _renewalCard(r)),
+            const SizedBox(height: 24),
+          ],
           Row(children: [
             _alertFilterChip('TODAS', 'Todas'),
             const SizedBox(width: 8),
@@ -12041,7 +12496,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             _alertFilterChip('INFO', 'Info'),
           ]),
           const SizedBox(height: 24),
-          if (filtered.isEmpty)
+          if (filtered.isEmpty && renewals.isEmpty)
             _card(
               title: 'SIN ALERTAS',
               child: Padding(
@@ -12083,6 +12538,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
   Widget _alertsPageMobile() {
     final filtered = filteredAlerts(context);
+    final renewals = renewalRequests.where((r) => r['read'] != true).toList();
+
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
       child: Column(
@@ -12097,11 +12554,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               )),
           const SizedBox(height: 4),
           Text(
-              alertCount(context) == 0
+              (alertCount(context) + renewals.length) == 0
                   ? 'Todo al día'
-                  : '${alertCount(context)} ${alertCount(context) == 1 ? "pendiente" : "pendientes"}',
+                  : '${alertCount(context) + renewals.length} pendientes',
               style: TextStyle(color: context.colors.muted, fontSize: 13)),
           const SizedBox(height: 18),
+          if (renewals.isNotEmpty) ...[
+            Text('SOLICITUDES DE RENOVACIÓN',
+                style: TextStyle(
+                  color: context.colors.yellow,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                )),
+            const SizedBox(height: 12),
+            ...renewals.map((r) => _renewalCard(r)),
+            const SizedBox(height: 24),
+          ],
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(children: [
@@ -12117,7 +12586,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ]),
           ),
           const SizedBox(height: 20),
-          if (filtered.isEmpty)
+          if (filtered.isEmpty && renewals.isEmpty)
             Container(
               padding: const EdgeInsets.all(40),
               decoration: BoxDecoration(
@@ -12144,11 +12613,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         fontSize: 16,
                         fontWeight: FontWeight.w900,
                       )),
-                  const SizedBox(height: 6),
-                  Text('No hay alertas pendientes',
-                      style:
-                          TextStyle(color: context.colors.muted, fontSize: 12),
-                      textAlign: TextAlign.center),
                 ]),
               ),
             )
@@ -12156,6 +12620,82 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ...filtered.map((alert) => _alertCard(alert)),
         ],
       ),
+    );
+  }
+
+  Widget _renewalCard(Map<String, dynamic> r) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+            color: context.colors.yellow.withValues(alpha: .40), width: 1.5),
+      ),
+      child: Row(children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: context.colors.yellow.withValues(alpha: .12),
+            borderRadius: BorderRadius.circular(13),
+          ),
+          child: Icon(Icons.autorenew_rounded,
+              color: context.colors.yellow, size: 22),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: context.colors.yellow.withValues(alpha: .15),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text('RENOVACIÓN',
+                    style: TextStyle(
+                      color: context.colors.yellow,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.5,
+                    )),
+              ),
+              const SizedBox(height: 6),
+              Text(r['name'].toString(),
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                  )),
+              const SizedBox(height: 3),
+              Text('Plan ${r['plan']} · vence ${r['expiry']}',
+                  style: TextStyle(color: context.colors.muted, fontSize: 11)),
+            ],
+          ),
+        ),
+        Column(
+          children: [
+            IconButton(
+              onPressed: () {
+                setState(() => r['read'] = true);
+                _saveLocalData();
+              },
+              icon: Icon(Icons.close_rounded,
+                  color: context.colors.muted, size: 18),
+            ),
+            IconButton(
+              onPressed: () => openGymWhatsApp(
+                  customText:
+                      'Hola ${r['name']}, recibimos tu solicitud de renovación del plan ${r['plan']}.'),
+              icon: Icon(Icons.reply_rounded,
+                  color: context.colors.green, size: 18),
+            ),
+          ],
+        ),
+      ]),
     );
   }
 
@@ -12365,7 +12905,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── WIDGETS AUXILIARES ──
+  // ═══════════════════════════════════════════════════════════
+  // AUXILIARES
+  // ═══════════════════════════════════════════════════════════
   Widget _quickAction(
     IconData icon,
     String text,
@@ -12701,9 +13243,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(13),
-        onTap: () {
+        onTap: () async {
           setState(() => qrMode = mode);
           generateGymQr();
+          await _saveLocalData();
         },
         child: Container(
           padding: const EdgeInsets.all(12),
@@ -12777,13 +13320,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     ]);
   }
 
-  Widget _modulePage() {
-    return Center(
-      child: Text('Módulo en construcción',
-          style: TextStyle(color: context.colors.muted)),
-    );
-  }
-
   void showClientDetail(Map<String, dynamic> member) {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => _ClientProfilePage(
@@ -12851,105 +13387,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ── MOBILE (ADMIN) ──
+  // ═══════════════════════════════════════════════════════════
+  // MOBILE (ADMIN)
+  // ═══════════════════════════════════════════════════════════
   Widget _mobile() {
-    final ac = alertCount(context);
     return SafeArea(
       child: Column(
         children: [
-          Container(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-            decoration: BoxDecoration(
-              color: context.colors.bg,
-              border: Border(bottom: BorderSide(color: context.colors.border)),
-            ),
-            child: Row(
-              children: [
-                Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => _scaffoldKey.currentState?.openDrawer(),
-                    child: Container(
-                      width: 42,
-                      height: 42,
-                      decoration: BoxDecoration(
-                        color: context.colors.panel,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: context.colors.border),
-                      ),
-                      child: Icon(Icons.menu_rounded,
-                          color: context.colors.white, size: 22),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: context.colors.red,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.bolt_rounded, color: Colors.black),
-                ),
-                const SizedBox(width: 11),
-                Expanded(
-                  child: Text('SYNTHETIX GYM OS',
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                        fontSize: 13,
-                      )),
-                ),
-                IconButton(
-                  onPressed: () => themeController.toggle(),
-                  icon: Icon(
-                    themeController.isDark
-                        ? Icons.light_mode_rounded
-                        : Icons.dark_mode_rounded,
-                    color: context.colors.yellow,
-                  ),
-                ),
-                IconButton(
-                  onPressed: () => loadAllData(),
-                  icon:
-                      Icon(Icons.refresh_rounded, color: context.colors.green),
-                ),
-                Stack(
-                  children: [
-                    IconButton(
-                      onPressed: showNotifications,
-                      icon: Icon(Icons.notifications_none_rounded,
-                          color: context.colors.white),
-                    ),
-                    if (ac > 0)
-                      Positioned(
-                        right: 8,
-                        top: 8,
-                        child: Container(
-                          padding: const EdgeInsets.all(4),
-                          constraints:
-                              const BoxConstraints(minWidth: 16, minHeight: 16),
-                          decoration: BoxDecoration(
-                            color: context.colors.red,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Text('$ac',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 9,
-                                fontWeight: FontWeight.w900,
-                              )),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+          _mobileHeader(),
           Expanded(
             child: loadingData
                 ? Center(
@@ -12963,1268 +13408,109 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _mobileContent() {
-    switch (_section) {
-      case 0:
-        return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 110),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _heroMobile(),
-              const SizedBox(height: 18),
-              _metricsMobile(),
-              const SizedBox(height: 18),
-              _activityCard(),
-              const SizedBox(height: 16),
-              _plansCard(),
-              const SizedBox(height: 16),
-              _membersCard(),
-            ],
-          ),
-        );
-      case 1:
-        return _clientsPage();
-      case 2:
-        return _qrCenterMobile();
-      case 3:
-        return _plansPageMobile();
-      case 4:
-        return _financePage();
-      case 5:
-        return _trainingPageMobile();
-      case 6:
-        return _alertsPageMobile();
-      case 7:
-        return _currencyPage();
-      default:
-        return _modulePage();
-    }
-  }
-
-  // ── ENTRENAMIENTO MÓVIL ──
-  Widget _trainingPageMobile() {
-    final tabs = ['Rutinas', 'Ejercicios', 'Trainers', 'Tipos', 'Horario'];
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
-          decoration: BoxDecoration(
-            color: context.colors.bg,
-            border: Border(bottom: BorderSide(color: context.colors.border)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Entrenamiento',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.5,
-                  )),
-              const SizedBox(height: 4),
-              Text('Rutinas · Ejercicios · Entrenadores · Clases',
-                  style: TextStyle(color: context.colors.muted, fontSize: 12)),
-              const SizedBox(height: 16),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: List.generate(tabs.length, (i) {
-                    final active = trainingTab == i;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: GestureDetector(
-                        onTap: () => setState(() => trainingTab = i),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 18, vertical: 11),
-                          decoration: BoxDecoration(
-                            color: active
-                                ? context.colors.purple.withValues(alpha: .15)
-                                : context.colors.panel,
-                            borderRadius: BorderRadius.circular(30),
-                            border: Border.all(
-                              color: active
-                                  ? context.colors.purple.withValues(alpha: .55)
-                                  : context.colors.border,
-                              width: 1.2,
-                            ),
-                          ),
-                          child: Text(tabs[i],
-                              style: TextStyle(
-                                color: active
-                                    ? context.colors.purple
-                                    : context.colors.muted,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.3,
-                              )),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-              ),
-              const SizedBox(height: 14),
-            ],
-          ),
-        ),
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 110),
-            child: _trainingContentMobile(),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _trainingContentMobile() {
-    switch (trainingTab) {
-      case 0:
-        return _routinesTabMobile();
-      case 1:
-        return _exercisesTabMobile();
-      case 2:
-        return _trainersTabMobile();
-      case 3:
-        return _classTypesTabMobile();
-      case 4:
-        return _scheduleTabMobile();
-      default:
-        return _routinesTabMobile();
-    }
-  }
-
-  Widget _routinesTabMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _trainingHeader(
-          title: 'Rutinas',
-          count: routines.length,
-          labelAction: 'NUEVA RUTINA',
-          onAction: addRoutine,
-        ),
-        const SizedBox(height: 16),
-        if (routines.isEmpty)
-          _emptyState(
-            icon: Icons.fitness_center_rounded,
-            color: context.colors.red,
-            title: 'Sin rutinas',
-            subtitle: 'Crea tu primera rutina de entrenamiento',
-            actionLabel: 'CREAR RUTINA',
-            onAction: addRoutine,
-          )
-        else
-          ...routines.map((r) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _routineCardMobile(r),
-              )),
-      ],
-    );
-  }
-
-  Widget _routineCardMobile(Map<String, dynamic> routine) {
-    final level = routine['level'].toString();
-    final levelColor = level == 'Principiante'
-        ? context.colors.green
-        : level == 'Intermedio'
-            ? context.colors.yellow
-            : context.colors.red;
-
-    final routineId = routine['id'].toString();
-    final assignedCount =
-        members.where((m) => m['assignedRoutineId'] == routineId).length;
-
+  Widget _mobileHeader() {
+    final ac = alertCount(context) + renewalRequests.length;
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
       decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: context.colors.border),
+        color: context.colors.bg,
+        border: Border(bottom: BorderSide(color: context.colors.border)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Row(children: [
-            Expanded(
-              child: Text(routine['name'].toString(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ),
-            _menuBtn(
-              onEdit: () => editRoutine(routine),
-              onDelete: () => deleteRoutine(routine),
-            ),
-          ]),
-          const SizedBox(height: 8),
-          Row(children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: levelColor.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(30),
-                border: Border.all(color: levelColor.withValues(alpha: .4)),
-              ),
-              child: Text(level,
-                  style: TextStyle(
-                    color: levelColor,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.5,
-                  )),
-            ),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(
-                color: context.colors.purple.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: Text('$assignedCount asignados',
-                  style: TextStyle(
-                    color: context.colors.purple,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                  )),
-            ),
-          ]),
-          const SizedBox(height: 14),
-          Row(children: [
-            _infoChip(Icons.timer_rounded, '${routine['duration']} min'),
-            const SizedBox(width: 16),
-            _infoChip(Icons.fitness_center_rounded,
-                '${routine['exercises']} ejercicios'),
-          ]),
-          const SizedBox(height: 12),
-          Text(routine['equipment'].toString(),
-              style: TextStyle(color: context.colors.muted, fontSize: 11),
-              overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => showAssignRoutineDialog(routine),
-              icon: const Icon(Icons.person_add_rounded, size: 14),
-              label: const Text('ASIGNAR A CLIENTE',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 11,
-                    letterSpacing: 0.5,
-                  )),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: context.colors.purple,
-                side: BorderSide(
-                    color: context.colors.purple.withValues(alpha: .45)),
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _exercisesTabMobile() {
-    final muscles = [
-      'TODOS',
-      'Pecho',
-      'Espalda',
-      'Piernas',
-      'Hombros',
-      'Brazos',
-      'Core'
-    ];
-    final filtered = exerciseFilter == 'TODOS'
-        ? exercises
-        : exercises.where((e) => e['muscle'] == exerciseFilter).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _trainingHeader(
-          title: 'Ejercicios',
-          count: exercises.length,
-          labelAction: 'NUEVO',
-          onAction: addExercise,
-        ),
-        const SizedBox(height: 14),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            children: muscles.map((m) {
-              final active = exerciseFilter == m;
-              return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: GestureDetector(
-                  onTap: () => setState(() => exerciseFilter = m),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                    decoration: BoxDecoration(
-                      color: active
-                          ? context.colors.purple.withValues(alpha: .15)
-                          : context.colors.panel,
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(
-                        color: active
-                            ? context.colors.purple.withValues(alpha: .55)
-                            : context.colors.border,
-                        width: 1.2,
-                      ),
-                    ),
-                    child: Text(m.toUpperCase(),
-                        style: TextStyle(
-                          color: active
-                              ? context.colors.purple
-                              : context.colors.muted,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.8,
-                        )),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-        const SizedBox(height: 16),
-        if (filtered.isEmpty)
-          _emptyState(
-            icon: Icons.fitness_center_rounded,
-            color: context.colors.purple,
-            title: 'Sin ejercicios',
-            subtitle: 'Agrega tu primer ejercicio a la biblioteca',
-            actionLabel: 'CREAR EJERCICIO',
-            onAction: addExercise,
-          )
-        else
-          ...filtered.map((e) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _exerciseRowMobile(e),
-              )),
-      ],
-    );
-  }
-
-  Widget _exerciseRowMobile(Map<String, dynamic> exercise) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Row(children: [
-        Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            color: context.colors.purple.withValues(alpha: .12),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Icon(Icons.fitness_center_rounded,
-              color: context.colors.purple, size: 20),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(exercise['name'].toString(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 3),
-              Text(
-                  '${exercise['muscle']} · ${exercise['sets']}x${exercise['reps']} · ${exercise['weight']}kg',
-                  style: TextStyle(color: context.colors.muted, fontSize: 11),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ],
-          ),
-        ),
-        _menuBtn(
-          onEdit: () => editExercise(exercise),
-          onDelete: () => deleteExercise(exercise),
-        ),
-      ]),
-    );
-  }
-
-  Widget _trainersTabMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _trainingHeader(
-          title: 'Entrenadores',
-          count: trainers.length,
-          labelAction: 'NUEVO',
-          onAction: addTrainer,
-        ),
-        const SizedBox(height: 16),
-        if (trainers.isEmpty)
-          _emptyState(
-            icon: Icons.people_alt_rounded,
-            color: context.colors.green,
-            title: 'Sin entrenadores',
-            subtitle: 'Agrega a tu primer entrenador del equipo',
-            actionLabel: 'CREAR ENTRENADOR',
-            onAction: addTrainer,
-          )
-        else
-          ...trainers.map((t) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _trainerCardMobile(t),
-              )),
-      ],
-    );
-  }
-
-  Widget _trainerCardMobile(Map<String, dynamic> trainer) {
-    final name = trainer['name'].toString();
-    final initial = name.isEmpty ? '?' : name[0].toUpperCase();
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(
-        children: [
-          Row(children: [
-            Container(
-              width: 50,
-              height: 50,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                    colors: [context.colors.purple, context.colors.red]),
-                borderRadius: BorderRadius.circular(15),
-              ),
-              alignment: Alignment.center,
-              child: Text(initial,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w900,
-                  )),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(name,
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w900,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 3),
-                  Text(trainer['specialty'].toString(),
-                      style: TextStyle(
-                        color: context.colors.purple,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                ],
-              ),
-            ),
-            _menuBtn(
-              onEdit: () => editTrainer(trainer),
-              onDelete: () => deleteTrainer(trainer),
-            ),
-          ]),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            decoration: BoxDecoration(
-              color: context.colors.panel2,
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: context.colors.border),
+              onTap: () => _scaffoldKey.currentState?.openDrawer(),
+              child: Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Icon(Icons.menu_rounded,
+                    color: context.colors.white, size: 22),
+              ),
             ),
-            child: Row(children: [
-              Expanded(
-                child: _trainerStat(Icons.star_rounded, context.colors.yellow,
-                    trainer['rating'].toString(), 'Rating'),
-              ),
-              Container(width: 1, height: 30, color: context.colors.border),
-              Expanded(
-                child: _trainerStat(Icons.people_rounded, context.colors.green,
-                    '${trainer['clients']}', 'Clientes'),
-              ),
-              Container(width: 1, height: 30, color: context.colors.border),
-              Expanded(
-                child: _trainerStat(
-                    Icons.schedule_rounded,
-                    context.colors.purple,
-                    trainer['schedule'].toString().split(' - ').first,
-                    'Desde'),
-              ),
-            ]),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trainerStat(IconData icon, Color color, String value, String label) {
-    return Column(children: [
-      Icon(icon, color: color, size: 16),
-      const SizedBox(height: 4),
-      Text(value,
-          style: TextStyle(
-            color: context.colors.white,
-            fontSize: 13,
-            fontWeight: FontWeight.w900,
+          const SizedBox(width: 10),
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: context.colors.red,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.bolt_rounded, color: Colors.black),
           ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis),
-      const SizedBox(height: 2),
-      Text(label,
-          style: TextStyle(
-            color: context.colors.muted,
-            fontSize: 9,
-            fontWeight: FontWeight.w600,
-          )),
-    ]);
-  }
-
-  Widget _classTypesTabMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _trainingHeader(
-          title: 'Tipos de clase',
-          count: classTypes.length,
-          labelAction: 'NUEVO',
-          onAction: addClassType,
-        ),
-        const SizedBox(height: 16),
-        if (classTypes.isEmpty)
-          _emptyState(
-            icon: Icons.category_rounded,
-            color: context.colors.orange,
-            title: 'Sin tipos de clase',
-            subtitle: 'Crea tipos como Yoga, Boxeo, Spinning, etc.',
-            actionLabel: 'CREAR TIPO',
-            onAction: addClassType,
-          )
-        else
-          ...classTypes.map((ct) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: _classTypeRowMobile(ct),
-              )),
-      ],
-    );
-  }
-
-  Widget _classTypeRowMobile(Map<String, dynamic> ct) {
-    final color = Color(ct['color'] as int);
-    final iconData = _iconFromCodePoint(ct['icon'] as int);
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: .3)),
-      ),
-      child: Row(children: [
-        Container(
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: .15),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: color.withValues(alpha: .35)),
-          ),
-          alignment: Alignment.center,
-          child: Icon(iconData, color: color, size: 24),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(ct['name'].toString().toUpperCase(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.5,
-                  )),
-              const SizedBox(height: 3),
-              Text(
-                  '#${color.value.toRadixString(16).substring(2).toUpperCase()}',
-                  style: TextStyle(
-                    color: context.colors.muted,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  )),
-            ],
-          ),
-        ),
-        _menuBtn(
-          onEdit: () => editClassType(ct),
-          onDelete: () => deleteClassType(ct),
-        ),
-      ]),
-    );
-  }
-
-  Widget _scheduleTabMobile() {
-    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _trainingHeader(
-          title: 'Horario',
-          count: classes.length,
-          labelAction: 'NUEVA',
-          onAction: addClass,
-        ),
-        const SizedBox(height: 16),
-        if (classes.isEmpty)
-          _emptyState(
-            icon: Icons.calendar_today_rounded,
-            color: context.colors.green,
-            title: 'Sin clases',
-            subtitle: 'Programa tu primera clase del horario',
-            actionLabel: 'CREAR CLASE',
-            onAction: addClass,
-          )
-        else
-          ...days.map((day) {
-            final dayClasses = classes.where((c) => c['day'] == day).toList()
-              ..sort((a, b) =>
-                  a['time'].toString().compareTo(b['time'].toString()));
-            if (dayClasses.isEmpty) return const SizedBox.shrink();
-            return Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: context.colors.panel,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: context.colors.green.withValues(alpha: .12),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(day,
-                          style: TextStyle(
-                            color: context.colors.green,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.8,
-                          )),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                        '${dayClasses.length} ${dayClasses.length == 1 ? "clase" : "clases"}',
-                        style: TextStyle(
-                          color: context.colors.muted,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        )),
-                  ]),
-                  const SizedBox(height: 12),
-                  ...dayClasses.map((c) => _classSlotMobile(c)),
-                ],
-              ),
-            );
-          }),
-      ],
-    );
-  }
-
-  Widget _classSlotMobile(Map<String, dynamic> classItem) {
-    Color color = context.colors.purple;
-    for (final ct in classTypes) {
-      if (ct['name'].toString().toUpperCase() ==
-          classItem['type'].toString().toUpperCase()) {
-        color = Color(ct['color'] as int);
-        break;
-      }
-    }
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: context.colors.panel2,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.35)),
-      ),
-      child: Row(children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(classItem['time'].toString(),
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-              )),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(classItem['name'].toString(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-              const SizedBox(height: 2),
-              Text(
-                  '${classItem['trainer']} · ${classItem['enrolled']}/${classItem['capacity']}',
-                  style: TextStyle(color: context.colors.muted, fontSize: 10),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ],
-          ),
-        ),
-        _menuBtn(
-          onEdit: () => editClass(classItem),
-          onDelete: () => deleteClass(classItem),
-        ),
-      ]),
-    );
-  }
-
-  Widget _trainingHeader({
-    required String title,
-    required int count,
-    required String labelAction,
-    required VoidCallback onAction,
-  }) {
-    return Row(children: [
-      Expanded(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title,
+          const SizedBox(width: 11),
+          Expanded(
+            child: Text('SYNTHETIX GYM OS',
                 style: TextStyle(
                   color: context.colors.white,
-                  fontSize: 16,
                   fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                  fontSize: 13,
                 )),
-            const SizedBox(height: 2),
-            Text('$count ${count == 1 ? "registro" : "registros"}',
-                style: TextStyle(color: context.colors.muted, fontSize: 11)),
-          ],
-        ),
-      ),
-      ElevatedButton.icon(
-        onPressed: onAction,
-        icon: const Icon(Icons.add_rounded, size: 16),
-        label: Text(labelAction,
-            style: const TextStyle(
-              fontWeight: FontWeight.w900,
-              fontSize: 11,
-              letterSpacing: 0.3,
-            )),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: context.colors.red,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          elevation: 0,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
-      ),
-    ]);
-  }
-
-  Widget _menuBtn({
-    required VoidCallback onEdit,
-    required VoidCallback onDelete,
-  }) {
-    return SizedBox(
-      width: 32,
-      height: 32,
-      child: PopupMenuButton<String>(
-        padding: EdgeInsets.zero,
-        icon: Icon(Icons.more_vert_rounded,
-            color: context.colors.muted, size: 20),
-        color: context.colors.panel2,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: BorderSide(color: context.colors.border),
-        ),
-        onSelected: (value) {
-          if (value == 'edit') onEdit();
-          if (value == 'delete') onDelete();
-        },
-        itemBuilder: (_) => [
-          PopupMenuItem<String>(
-            value: 'edit',
-            child: Row(children: [
-              Icon(Icons.edit_rounded, color: context.colors.yellow, size: 18),
-              const SizedBox(width: 10),
-              Text('Editar', style: TextStyle(color: context.colors.white)),
-            ]),
           ),
-          PopupMenuItem<String>(
-            value: 'delete',
-            child: Row(children: [
-              Icon(Icons.delete_rounded, color: context.colors.red, size: 18),
-              const SizedBox(width: 10),
-              Text('Eliminar', style: TextStyle(color: context.colors.red)),
-            ]),
+          IconButton(
+            onPressed: () => loadAllData(),
+            icon: Icon(Icons.refresh_rounded, color: context.colors.green),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoChip(IconData icon, String text) {
-    return Row(children: [
-      Icon(icon, color: context.colors.muted, size: 14),
-      const SizedBox(width: 5),
-      Text(text,
-          style: TextStyle(
-            color: context.colors.white,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-          )),
-    ]);
-  }
-
-  Widget _emptyState({
-    required IconData icon,
-    required Color color,
-    required String title,
-    required String subtitle,
-    required String actionLabel,
-    required VoidCallback onAction,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(36),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(children: [
-        Container(
-          width: 70,
-          height: 70,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: .12),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Icon(icon, color: color, size: 34),
-        ),
-        const SizedBox(height: 18),
-        Text(title,
-            style: TextStyle(
-              color: context.colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.w900,
-            )),
-        const SizedBox(height: 6),
-        Text(subtitle,
-            textAlign: TextAlign.center,
-            style: TextStyle(color: context.colors.muted, fontSize: 12)),
-        const SizedBox(height: 20),
-        SizedBox(
-          width: double.infinity,
-          height: 48,
-          child: ElevatedButton.icon(
-            onPressed: onAction,
-            icon: const Icon(Icons.add_rounded, size: 18),
-            label: Text(actionLabel,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w900,
-                  fontSize: 12,
-                )),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: color,
-              foregroundColor: Colors.black,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
-
-  // ── HOME MOBILE ──
-  Widget _heroMobile() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Hello,',
-                    style: TextStyle(
-                      color: context.colors.muted,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    )),
-                const SizedBox(height: 2),
-                Text('Admin',
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 26,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: -0.5,
-                    )),
-              ],
-            ),
-          ),
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                  colors: [context.colors.orange, context.colors.red]),
-              border: Border.all(
-                color: context.colors.orange.withValues(alpha: .5),
-                width: 2,
-              ),
-            ),
-            alignment: Alignment.center,
-            child: const Icon(Icons.admin_panel_settings_rounded,
-                color: Colors.white, size: 22),
-          ),
-        ]),
-        const SizedBox(height: 20),
-        Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: context.colors.cardBg,
-            borderRadius: BorderRadius.circular(24),
-            border:
-                Border.all(color: context.colors.white.withValues(alpha: .04)),
-          ),
-          child: Row(children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Aforo actual',
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                      )),
-                  const SizedBox(height: 2),
-                  Text('$inside personas dentro',
-                      style:
-                          TextStyle(color: context.colors.muted, fontSize: 11)),
-                  const SizedBox(height: 16),
-                  Row(children: [
-                    _miniDotStat(
-                        '$capacity', 'Capacidad', context.colors.muted),
-                    const SizedBox(width: 14),
-                    _miniDotStat(
-                        '${capacity - inside}', 'Libres', context.colors.green),
-                  ]),
-                ],
-              ),
-            ),
-            const SizedBox(width: 14),
-            SizedBox(
-              width: 110,
-              height: 110,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  TweenAnimationBuilder<double>(
-                    duration: const Duration(milliseconds: 1400),
-                    curve: Curves.easeOutCubic,
-                    tween: Tween(begin: 0.0, end: occupancy),
-                    builder: (context, value, _) {
-                      return CustomPaint(
-                        size: const Size(110, 110),
-                        painter: _RingPainter(
-                          percentage: value,
-                          color: context.colors.orange,
-                          trackColor:
-                              context.colors.white.withValues(alpha: .06),
-                          strokeWidth: 9,
-                        ),
-                      );
-                    },
-                  ),
-                  if (loadingCheckins)
-                    SizedBox(
-                      width: 30,
-                      height: 30,
-                      child: CircularProgressIndicator(
-                        color: context.colors.orange,
-                        strokeWidth: 2.5,
-                      ),
-                    )
-                  else
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('$inside',
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 28,
-                              fontWeight: FontWeight.w900,
-                              height: 1,
-                            )),
-                        const SizedBox(height: 2),
-                        Text('DENTRO',
-                            style: TextStyle(
-                              color: context.colors.muted,
-                              fontSize: 8,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.5,
-                            )),
-                      ],
-                    ),
-                ],
-              ),
-            ),
-          ]),
-        ),
-      ],
-    );
-  }
-
-  Widget _miniDotStat(String value, String label, Color color) {
-    return Row(children: [
-      Container(
-        width: 6,
-        height: 6,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-      const SizedBox(width: 6),
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(value,
-              style: TextStyle(
-                color: context.colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w900,
-              )),
-          Text(label,
-              style: TextStyle(color: context.colors.muted, fontSize: 9)),
-        ],
-      ),
-    ]);
-  }
-
-  Widget _metricsMobile() {
-    final totalClientes = members.length;
-    final activos = members.where((m) => m['status'] == 'ACTIVO').length;
-    final pendientes = members.where((m) => m['status'] == 'PENDIENTE').length;
-    final vencidos = members.where((m) => m['status'] == 'VENCIDO').length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 12),
-          child: Text('MÉTRICAS',
-              style: TextStyle(
-                color: context.colors.muted,
-                fontSize: 10,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 2,
-              )),
-        ),
-        Row(children: [
-          Expanded(
-            child: _fitnessMetricCard(
-              icon: Icons.attach_money_rounded,
-              iconColor: context.colors.orange,
-              title: 'Ingresos',
-              value: formatPrice(income),
-              unit: 'este mes',
-              trend: '+14%',
-              trendColor: context.colors.orange,
-              chart: _RingMiniChart(
-                  percentage: 0.72, color: context.colors.orange),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: _fitnessMetricCard(
-              icon: Icons.people_alt_rounded,
-              iconColor: context.colors.cyan,
-              title: 'Miembros',
-              value: '$totalClientes',
-              unit: '$activos activos',
-              trend: '+8%',
-              trendColor: context.colors.cyan,
-              chart: _BarsMiniChart(
-                data: const [0.4, 0.55, 0.7, 0.5, 0.8, 0.6, 0.9],
-                color: context.colors.cyan,
-              ),
-            ),
-          ),
-        ]),
-        const SizedBox(height: 12),
-        Row(children: [
-          Expanded(
-            child: _fitnessMetricCard(
-              icon: Icons.person_add_alt_1_rounded,
-              iconColor: context.colors.purple,
-              title: 'Pendientes',
-              value: '$pendientes',
-              unit: 'por aprobar',
-              trend: 'HOY',
-              trendColor: context.colors.purple,
-              chart: _LineMiniChart(
-                data: const [0.3, 0.5, 0.4, 0.7, 0.5, 0.8, 0.6],
-                color: context.colors.purple,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: _fitnessMetricCard(
-              icon: Icons.block_rounded,
-              iconColor: context.colors.red,
-              title: 'Vencidos',
-              value: '$vencidos',
-              unit: 'requieren renovar',
-              trend: '-3%',
-              trendColor: context.colors.red,
-              chart: _LineMiniChart(
-                data: const [0.9, 0.75, 0.8, 0.6, 0.5, 0.4, 0.3],
-                color: context.colors.red,
-              ),
-            ),
-          ),
-        ]),
-      ],
-    );
-  }
-
-  Widget _fitnessMetricCard({
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String value,
-    required String unit,
-    required String trend,
-    required Color trendColor,
-    required Widget chart,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.colors.cardBg,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: context.colors.white.withValues(alpha: .04)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: iconColor.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: iconColor, size: 16),
-            ),
-            const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              decoration: BoxDecoration(
-                color: trendColor.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(trend,
-                  style: TextStyle(
-                    color: trendColor,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
-                  )),
-            ),
-          ]),
-          const SizedBox(height: 14),
-          Text(title,
-              style: TextStyle(
-                color: context.colors.muted,
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
-                letterSpacing: .5,
-              )),
-          const SizedBox(height: 6),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          Stack(
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(value,
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w900,
-                          height: 1,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 4),
-                    Text(unit,
-                        style:
-                            TextStyle(color: context.colors.muted, fontSize: 9),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                  ],
-                ),
+              IconButton(
+                onPressed: showNotifications,
+                icon: Icon(Icons.notifications_none_rounded,
+                    color: context.colors.white),
               ),
-              const SizedBox(width: 8),
-              SizedBox(width: 48, height: 48, child: chart),
+              if (ac > 0)
+                Positioned(
+                  right: 8,
+                  top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    constraints:
+                        const BoxConstraints(minWidth: 16, minHeight: 16),
+                    decoration: BoxDecoration(
+                      color: context.colors.red,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text('$ac',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                        )),
+                  ),
+                ),
             ],
           ),
         ],
       ),
     );
+  }
+
+  Widget _mobileContent() {
+    final isMobile = MediaQuery.of(context).size.width < 850;
+    if (_section == 1) return _clientsPage();
+    if (_section == 2) {
+      return isMobile ? _qrCenterMobile() : _qrCenter();
+    }
+    if (_section == 3) {
+      return isMobile ? _plansPageMobile() : _plansPage();
+    }
+    if (_section == 4) return _financePage();
+    if (_section == 5) return _trainingPage();
+    if (_section == 6) {
+      return isMobile ? _alertsPageMobile() : _alertsPage();
+    }
+    if (_section == 7) return _currencyPage();
+    return _dashboardContent();
   }
 
   Widget _mobileNav() {
@@ -14314,6 +13600,654 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ),
           );
         }).toList(),
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // SCANNER ADMIN
+  // ═══════════════════════════════════════════════════════════
+  void showAccessScanner() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          height: MediaQuery.of(sheetContext).size.height * 0.85,
+          decoration: BoxDecoration(
+            color: sheetContext.colors.bg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: sheetContext.colors.muted.withValues(alpha: .4),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  children: [
+                    Icon(Icons.qr_code_scanner_rounded,
+                        color: sheetContext.colors.red),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'ESCANEAR CLIENTE',
+                        style: TextStyle(
+                          color: sheetContext.colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: Icon(Icons.close_rounded,
+                          color: sheetContext.colors.muted),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: MobileScanner(
+                    onDetect: (capture) async {
+                      final barcodes = capture.barcodes;
+                      if (barcodes.isEmpty) return;
+                      final code = barcodes.first.rawValue;
+                      if (code == null || code.isEmpty) return;
+                      Navigator.pop(sheetContext);
+                      await _processClientQrScan(code);
+                    },
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Apunta al QR personal del cliente',
+                  style: TextStyle(
+                    color: sheetContext.colors.muted,
+                    fontSize: 12,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _processClientQrScan(String code) async {
+    Map<String, dynamic>? found;
+    for (final m in members) {
+      if (m['qrCode'].toString() == code) {
+        found = m;
+        break;
+      }
+    }
+
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    if (found == null) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('❌ Código no reconocido'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final status = found['status'].toString().toUpperCase();
+    final memberName = found['name'].toString();
+    final memberId = found['id'];
+    final isBlocked = status != 'ACTIVO';
+
+    String type = 'ENTRADA';
+    try {
+      final supabase = Supabase.instance.client;
+      final now = DateTime.now();
+      final startOfDay = DateTime(now.year, now.month, now.day);
+      final startOfDayStr = startOfDay.toIso8601String();
+
+      final todayCheckins = await supabase
+          .from('checkins')
+          .select()
+          .eq('member_id', memberId)
+          .gte('created_at', startOfDayStr)
+          .order('created_at', ascending: true);
+
+      final lastType = todayCheckins.isNotEmpty
+          ? todayCheckins.last['type'].toString().toUpperCase()
+          : '';
+      type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
+
+      await supabase.from('checkins').insert({
+        'member_id': memberId,
+        'type': type,
+        'authorized': !isBlocked,
+        'reason': isBlocked ? 'Membresía $status' : null,
+        'registered_by': 'admin',
+      });
+
+      await supabase.from('activities').insert({
+        'type': isBlocked ? 'BLOQUEADO' : type,
+        'name': memberName,
+      });
+
+      if (type == 'ENTRADA' && !isBlocked) {
+        final attendance = (found['attendance'] as num?)?.toInt() ?? 0;
+        await supabase.from('members').update({
+          'attendance': attendance + 1,
+          'last_visit': _formatDate(DateTime.now()),
+        }).eq('id', memberId);
+        if (mounted) {
+          setState(() {
+            found!['attendance'] = attendance + 1;
+            found['lastVisit'] = _formatDate(DateTime.now());
+            inside++;
+            clientInsideCount++;
+          });
+        }
+      } else if (type == 'SALIDA') {
+        if (mounted) {
+          setState(() {
+            if (clientInsideCount > 0) clientInsideCount--;
+          });
+        }
+      }
+
+      if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
+
+      await loadActivities();
+      await loadCheckins();
+      await _saveLocalData();
+
+      if (!mounted) return;
+      await _showAccessOverlay(
+        success: !isBlocked,
+        title: isBlocked ? 'ACCESO DENEGADO' : 'ACCESO PERMITIDO',
+        subtitle: isBlocked
+            ? 'Membresía $status. Contacta al gym.'
+            : type == 'ENTRADA'
+                ? '¡Bienvenido al gimnasio!'
+                : '¡Hasta pronto!',
+        name: memberName,
+        status: status,
+        type: type,
+      );
+    } catch (e) {
+      debugPrint('❌ Error procesando QR admin: $e');
+      if (mounted) {
+        await _showAccessOverlay(
+          success: false,
+          title: 'ERROR DE CONEXIÓN',
+          subtitle: 'No se pudo registrar. Intenta de nuevo.',
+          name: memberName,
+          status: 'ERROR',
+        );
+      }
+    }
+  }
+
+  void registerExit() {
+    if (inside <= 0) return;
+    setState(() => inside--);
+    addActivity('SALIDA', 'Acceso registrado');
+    _saveLocalData();
+    if (!mounted) return;
+    final ctx = context;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      const SnackBar(content: Text('Salida registrada correctamente')),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// PAINTERS
+// ═══════════════════════════════════════════════════════════
+class _OccupancyPainter extends CustomPainter {
+  final double percentage;
+  final Color trackColor;
+  final List<Color> progressColors;
+
+  _OccupancyPainter({
+    required this.percentage,
+    required this.trackColor,
+    required this.progressColors,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 12;
+    final trackPaint = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 14
+      ..strokeCap = StrokeCap.round;
+    final progressPaint = Paint()
+      ..shader = SweepGradient(
+        colors: progressColors,
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 14
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, trackPaint);
+    final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      sweepAngle,
+      false,
+      progressPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _OccupancyPainter oldDelegate) =>
+      oldDelegate.percentage != percentage;
+}
+
+class _MiniChartPainter extends CustomPainter {
+  final List<double> data;
+  final Color color;
+
+  _MiniChartPainter({required this.data, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (data.isEmpty) return;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          color.withValues(alpha: .35),
+          color.withValues(alpha: .0),
+        ],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..style = PaintingStyle.fill;
+    final path = Path();
+    final fillPath = Path();
+    final stepX = size.width / (data.length - 1);
+    final maxVal = data.reduce((a, b) => a > b ? a : b);
+    final safeMax = maxVal == 0 ? 1.0 : maxVal;
+    for (int i = 0; i < data.length; i++) {
+      final x = i * stepX;
+      final y = size.height - (data[i] / safeMax) * size.height;
+      if (i == 0) {
+        path.moveTo(x, y);
+        fillPath.moveTo(x, size.height);
+        fillPath.lineTo(x, y);
+      } else {
+        path.lineTo(x, y);
+        fillPath.lineTo(x, y);
+      }
+    }
+    fillPath.lineTo(size.width, size.height);
+    fillPath.close();
+    canvas.drawPath(fillPath, fillPaint);
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _MiniChartPainter oldDelegate) =>
+      oldDelegate.data != data || oldDelegate.color != color;
+}
+
+// ═══════════════════════════════════════════════════════════
+// WIDGETS AUXILIARES
+// ═══════════════════════════════════════════════════════════
+class _RateField extends StatefulWidget {
+  final String label;
+  final double initialValue;
+  final ValueChanged<double> onChanged;
+
+  const _RateField({
+    required this.label,
+    required this.initialValue,
+    required this.onChanged,
+  });
+
+  @override
+  State<_RateField> createState() => _RateFieldState();
+}
+
+class _RateFieldState extends State<_RateField> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue.toString());
+  }
+
+  @override
+  void didUpdateWidget(covariant _RateField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialValue != oldWidget.initialValue &&
+        _controller.text != widget.initialValue.toString()) {
+      _controller.text = widget.initialValue.toString();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      style: TextStyle(color: context.colors.white),
+      onChanged: (text) {
+        final v = double.tryParse(text.replaceAll(',', '.'));
+        if (v != null && v > 0) widget.onChanged(v);
+      },
+      decoration: InputDecoration(
+        labelText: widget.label,
+        labelStyle: TextStyle(color: context.colors.muted),
+        filled: true,
+        fillColor: context.colors.panel2,
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: BorderSide(color: context.colors.border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: BorderSide(color: context.colors.purple, width: 1.5),
+        ),
+      ),
+    );
+  }
+}
+
+class _GymPhoneField extends StatefulWidget {
+  final String initialValue;
+  final ValueChanged<String> onChanged;
+
+  const _GymPhoneField({
+    required this.initialValue,
+    required this.onChanged,
+  });
+
+  @override
+  State<_GymPhoneField> createState() => _GymPhoneFieldState();
+}
+
+class _GymPhoneFieldState extends State<_GymPhoneField> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue);
+  }
+
+  @override
+  void didUpdateWidget(covariant _GymPhoneField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialValue != oldWidget.initialValue &&
+        _controller.text != widget.initialValue) {
+      _controller.text = widget.initialValue;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _controller,
+      keyboardType: TextInputType.phone,
+      style: TextStyle(color: context.colors.white),
+      onChanged: widget.onChanged,
+      decoration: InputDecoration(
+        labelText: 'Ej: +58 412 1234567',
+        labelStyle: TextStyle(color: context.colors.muted),
+        prefixIcon: Icon(Icons.phone_rounded, color: context.colors.muted),
+        filled: true,
+        fillColor: context.colors.panel2,
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: BorderSide(color: context.colors.border),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(13),
+          borderSide: BorderSide(color: context.colors.purple, width: 1.5),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChangePinSection extends StatefulWidget {
+  final String adminPin;
+  final Future<void> Function(String newPin) onPinChanged;
+
+  const _ChangePinSection({
+    required this.adminPin,
+    required this.onPinChanged,
+  });
+
+  @override
+  State<_ChangePinSection> createState() => _ChangePinSectionState();
+}
+
+class _ChangePinSectionState extends State<_ChangePinSection> {
+  final _currentPinCtrl = TextEditingController();
+  final _newPinCtrl = TextEditingController();
+  final _confirmPinCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _currentPinCtrl.dispose();
+    _newPinCtrl.dispose();
+    _confirmPinCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _updatePin() async {
+    final ctx = context;
+    final current = _currentPinCtrl.text.trim();
+    final newPin = _newPinCtrl.text.trim();
+    final confirm = _confirmPinCtrl.text.trim();
+
+    if (current != widget.adminPin) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('PIN actual incorrecto'),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+      return;
+    }
+    if (!RegExp(r'^\d{4}$').hasMatch(newPin)) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('El nuevo PIN debe tener exactamente 4 dígitos'),
+          backgroundColor: ctx.colors.yellow,
+        ),
+      );
+      return;
+    }
+    if (newPin != confirm) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('Los PIN nuevos no coinciden'),
+          backgroundColor: ctx.colors.red,
+        ),
+      );
+      return;
+    }
+    if (newPin == current) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('El nuevo PIN debe ser distinto al actual'),
+          backgroundColor: ctx.colors.yellow,
+        ),
+      );
+      return;
+    }
+
+    await widget.onPinChanged(newPin);
+
+    _currentPinCtrl.clear();
+    _newPinCtrl.clear();
+    _confirmPinCtrl.clear();
+
+    if (mounted) {
+      ScaffoldMessenger.of(ctx).showSnackBar(
+        SnackBar(
+          content: const Text('✅ PIN actualizado correctamente'),
+          backgroundColor: ctx.colors.green,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Cambia el PIN de acceso del administrador.',
+          style: TextStyle(color: context.colors.muted, fontSize: 11),
+        ),
+        const SizedBox(height: 16),
+        _pinField(
+          controller: _currentPinCtrl,
+          label: 'PIN actual',
+          icon: Icons.lock_outline_rounded,
+        ),
+        const SizedBox(height: 10),
+        _pinField(
+          controller: _newPinCtrl,
+          label: 'Nuevo PIN (4 dígitos)',
+          icon: Icons.lock_open_rounded,
+        ),
+        const SizedBox(height: 10),
+        _pinField(
+          controller: _confirmPinCtrl,
+          label: 'Confirmar nuevo PIN',
+          icon: Icons.verified_user_rounded,
+        ),
+        const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _updatePin,
+            icon: const Icon(Icons.save_rounded, size: 18),
+            label: const Text('ACTUALIZAR PIN',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12,
+                )),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: context.colors.yellow.withValues(alpha: .08),
+            borderRadius: BorderRadius.circular(12),
+            border:
+                Border.all(color: context.colors.yellow.withValues(alpha: .30)),
+          ),
+          child: Row(children: [
+            Icon(Icons.info_outline_rounded,
+                color: context.colors.yellow, size: 16),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Si olvidas el PIN, borra la app o reinstala para resetearlo.',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ],
+    );
+  }
+
+  Widget _pinField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+  }) {
+    return TextField(
+      controller: controller,
+      obscureText: true,
+      keyboardType: TextInputType.number,
+      maxLength: 4,
+      style: TextStyle(
+        color: context.colors.white,
+        fontSize: 16,
+        letterSpacing: 8,
+        fontWeight: FontWeight.w900,
+      ),
+      decoration: InputDecoration(
+        counterText: '',
+        labelText: label,
+        labelStyle: TextStyle(
+          color: context.colors.muted,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0,
+        ),
+        prefixIcon: Icon(icon, color: context.colors.red, size: 20),
+        filled: true,
+        fillColor: context.colors.panel2,
+        contentPadding:
+            const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: context.colors.border, width: 1.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: context.colors.red, width: 2),
+        ),
       ),
     );
   }
@@ -14879,230 +14813,5 @@ class _ClientProfilePage extends StatelessWidget {
         ]),
       );
     });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-// PAINTERS
-// ═══════════════════════════════════════════════════════════
-class _OccupancyPainter extends CustomPainter {
-  final double percentage;
-  final Color trackColor;
-  final List<Color> progressColors;
-
-  _OccupancyPainter({
-    required this.percentage,
-    required this.trackColor,
-    required this.progressColors,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - 12;
-    final trackPaint = Paint()
-      ..color = trackColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-    final progressPaint = Paint()
-      ..shader = SweepGradient(
-        colors: progressColors,
-        stops: const [0.0, 0.5, 1.0],
-      ).createShader(Rect.fromCircle(center: center, radius: radius))
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 14
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(center, radius, trackPaint);
-    final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius),
-      -math.pi / 2,
-      sweepAngle,
-      false,
-      progressPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _OccupancyPainter oldDelegate) =>
-      oldDelegate.percentage != percentage;
-}
-
-class _RingPainter extends CustomPainter {
-  final double percentage;
-  final Color color;
-  final Color trackColor;
-  final double strokeWidth;
-
-  _RingPainter({
-    required this.percentage,
-    required this.color,
-    required this.trackColor,
-    this.strokeWidth = 8,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2 - strokeWidth / 2;
-    final trackPaint = Paint()
-      ..color = trackColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.round;
-    final progressPaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(center, radius, trackPaint);
-    final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
-    canvas.drawArc(
-      Rect.fromCircle(center: center, radius: radius),
-      -math.pi / 2,
-      sweepAngle,
-      false,
-      progressPaint,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _RingPainter oldDelegate) =>
-      oldDelegate.percentage != percentage || oldDelegate.color != color;
-}
-
-class _MiniChartPainter extends CustomPainter {
-  final List<double> data;
-  final Color color;
-
-  _MiniChartPainter({required this.data, required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (data.isEmpty) return;
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    final fillPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          color.withValues(alpha: .35),
-          color.withValues(alpha: .0),
-        ],
-      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
-      ..style = PaintingStyle.fill;
-    final path = Path();
-    final fillPath = Path();
-    final stepX = size.width / (data.length - 1);
-    final maxVal = data.reduce((a, b) => a > b ? a : b);
-    final safeMax = maxVal == 0 ? 1.0 : maxVal;
-    for (int i = 0; i < data.length; i++) {
-      final x = i * stepX;
-      final y = size.height - (data[i] / safeMax) * size.height;
-      if (i == 0) {
-        path.moveTo(x, y);
-        fillPath.moveTo(x, size.height);
-        fillPath.lineTo(x, y);
-      } else {
-        path.lineTo(x, y);
-        fillPath.lineTo(x, y);
-      }
-    }
-    fillPath.lineTo(size.width, size.height);
-    fillPath.close();
-    canvas.drawPath(fillPath, fillPaint);
-    canvas.drawPath(path, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _MiniChartPainter oldDelegate) =>
-      oldDelegate.data != data || oldDelegate.color != color;
-}
-
-class _RingMiniChart extends StatelessWidget {
-  final double percentage;
-  final Color color;
-
-  const _RingMiniChart({required this.percentage, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return TweenAnimationBuilder<double>(
-      duration: const Duration(milliseconds: 1200),
-      curve: Curves.easeOutCubic,
-      tween: Tween(begin: 0.0, end: percentage.clamp(0.0, 1.0)),
-      builder: (context, value, _) {
-        return CustomPaint(
-          painter: _RingPainter(
-            percentage: value,
-            color: color,
-            trackColor: Colors.white.withValues(alpha: .06),
-            strokeWidth: 6,
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _BarsMiniChart extends StatelessWidget {
-  final List<double> data;
-  final Color color;
-
-  const _BarsMiniChart({required this.data, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(painter: _BarsPainter(data: data, color: color));
-  }
-}
-
-class _BarsPainter extends CustomPainter {
-  final List<double> data;
-  final Color color;
-
-  _BarsPainter({required this.data, required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (data.isEmpty) return;
-    final maxVal = data.reduce((a, b) => a > b ? a : b);
-    final safeMax = maxVal == 0 ? 1.0 : maxVal;
-    final barWidth = (size.width / data.length) * 0.6;
-    final gap = (size.width / data.length) * 0.4;
-    final paint = Paint()..style = PaintingStyle.fill;
-    for (int i = 0; i < data.length; i++) {
-      final barHeight = (data[i] / safeMax) * size.height * 0.9;
-      final x = i * (barWidth + gap) + gap / 2;
-      final y = size.height - barHeight;
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(x, y, barWidth, barHeight),
-        const Radius.circular(2),
-      );
-      paint.color = color.withValues(alpha: 0.4 + (i / data.length) * 0.6);
-      canvas.drawRRect(rect, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _BarsPainter oldDelegate) =>
-      oldDelegate.data != data || oldDelegate.color != color;
-}
-
-class _LineMiniChart extends StatelessWidget {
-  final List<double> data;
-  final Color color;
-
-  const _LineMiniChart({required this.data, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(painter: _MiniChartPainter(data: data, color: color));
   }
 }
