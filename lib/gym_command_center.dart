@@ -47,6 +47,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   String loginScreen = 'choose';
   int _section = 0;
+  final List<int> _sectionHistory = [];
 
   int capacity = 150;
   int inside = 0;
@@ -137,7 +138,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       'lastVisit': 'Sin registro',
       'qrCode': 'DEMO-CLIENT-001',
       'assignedRoutine': '',
-      'assignedRoutineId': '',
+      'assignedRoutineId': ''
     },
   ];
 
@@ -663,6 +664,21 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return transactions;
   }
 
+  void _goToSection(int newSection) {
+    if (newSection == _section) return;
+    _sectionHistory.add(_section);
+    setState(() => _section = newSection);
+  }
+
+  void _goBackInApp() {
+    if (_sectionHistory.isNotEmpty) {
+      final prev = _sectionHistory.removeLast();
+      setState(() => _section = prev);
+    } else if (_section != 0) {
+      setState(() => _section = 0);
+    }
+  }
+
   List<Map<String, dynamic>> activeAlerts(BuildContext context) {
     final alerts = <Map<String, dynamic>>[];
     for (final m in members) {
@@ -735,18 +751,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   List<Map<String, dynamic>> filteredAlerts(BuildContext context) {
     final all = activeAlerts(context);
     if (alertFilter == 'TODAS') return all;
-    if (alertFilter == 'PENDIENTES') {
+    if (alertFilter == 'PENDIENTES')
       return all.where((a) => a['type'] == 'PENDIENTE').toList();
-    }
-    if (alertFilter == 'VENCIDAS') {
+    if (alertFilter == 'VENCIDAS')
       return all.where((a) => a['type'] == 'VENCIDA').toList();
-    }
-    if (alertFilter == 'POR VENCER') {
+    if (alertFilter == 'POR VENCER')
       return all.where((a) => a['type'] == 'POR VENCER').toList();
-    }
-    if (alertFilter == 'INFO') {
+    if (alertFilter == 'INFO')
       return all.where((a) => a['type'] == 'AFORO').toList();
-    }
     return all;
   }
 
@@ -996,6 +1008,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   void logout() {
     _aforoTimer?.cancel();
+    _sectionHistory.clear();
     setState(() {
       currentRole = UserRole.none;
       loggedClient = null;
@@ -5047,7 +5060,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       child: InkWell(
                         borderRadius: BorderRadius.circular(14),
                         onTap: () {
-                          setState(() => _section = index);
+                          _goToSection(index);
                           Navigator.pop(context);
                         },
                         child: AnimatedContainer(
@@ -5258,12 +5271,103 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _mobile() {
-    return Scaffold(
-      backgroundColor: context.colors.bg,
-      drawer: _mobileDrawer(),
-      body: loadingData
-          ? Center(child: CircularProgressIndicator(color: context.colors.red))
-          : _content(),
+    final titles = [
+      'Command Center',
+      'Clientes',
+      'Acceso QR',
+      'Membresías',
+      'Finanzas',
+      'Entrenamiento',
+      'Alertas',
+      'Configuración',
+    ];
+    final title = (_section >= 0 && _section < titles.length)
+        ? titles[_section]
+        : 'Command Center';
+
+    final canLeaveApp = _section == 0 && _sectionHistory.isEmpty;
+
+    return PopScope(
+      canPop: canLeaveApp,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _goBackInApp();
+      },
+      child: Scaffold(
+        backgroundColor: context.colors.bg,
+        drawer: _mobileDrawer(),
+        appBar: AppBar(
+          backgroundColor: context.colors.panel,
+          elevation: 0,
+          centerTitle: false,
+          automaticallyImplyLeading: false,
+          leading: IconButton(
+            icon: Icon(
+              canLeaveApp ? Icons.menu_rounded : Icons.arrow_back_rounded,
+              color: context.colors.white,
+            ),
+            onPressed: () {
+              if (canLeaveApp) {
+                _scaffoldKey.currentState?.openDrawer();
+              } else {
+                _goBackInApp();
+              }
+            },
+          ),
+          title: Text(
+            title,
+            style: TextStyle(
+              color: context.colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 1,
+            ),
+          ),
+          actions: [
+            if (_section != 0)
+              IconButton(
+                tooltip: 'Inicio',
+                icon: Icon(Icons.home_rounded, color: context.colors.red),
+                onPressed: () {
+                  _sectionHistory.clear();
+                  setState(() => _section = 0);
+                },
+              ),
+            IconButton(
+              tooltip: 'Notificaciones',
+              icon: Icon(Icons.notifications_none_rounded,
+                  color: context.colors.white),
+              onPressed: showNotifications,
+            ),
+            const SizedBox(width: 4),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(1),
+            child: Container(height: 1, color: context.colors.border),
+          ),
+        ),
+        body: loadingData
+            ? Center(
+                child: CircularProgressIndicator(color: context.colors.red))
+            : Stack(
+                children: [
+                  _content(),
+                  if (_section != 0)
+                    Positioned(
+                      left: 12,
+                      bottom: 12,
+                      child: FloatingActionButton.small(
+                        backgroundColor: context.colors.panel,
+                        foregroundColor: context.colors.red,
+                        elevation: 4,
+                        tooltip: 'Regresar',
+                        onPressed: _goBackInApp,
+                        child: const Icon(Icons.arrow_back_rounded),
+                      ),
+                    ),
+                ],
+              ),
+      ),
     );
   }
 
@@ -5323,7 +5427,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     color: Colors.transparent,
                     child: InkWell(
                       borderRadius: BorderRadius.circular(14),
-                      onTap: () => setState(() => _section = index),
+                      onTap: () => _goToSection(index),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         padding: const EdgeInsets.symmetric(
@@ -5521,7 +5625,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             color: Colors.transparent,
             child: InkWell(
               borderRadius: BorderRadius.circular(13),
-              onTap: () => setState(() => _section = 7),
+              onTap: () => _goToSection(7),
               child: Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -5639,9 +5743,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         onNewMember: addMember,
         onOpenNotifications: showNotifications,
         onOpenMore: () => _scaffoldKey.currentState?.openDrawer(),
-        onOpenMemberships: () => setState(() => _section = 3),
-        onOpenClients: () => setState(() => _section = 1),
-        onOpenFinance: () => setState(() => _section = 4),
+        onOpenMemberships: () => _goToSection(3),
+        onOpenClients: () => _goToSection(1),
+        onOpenFinance: () => _goToSection(4),
       );
     }
     return _dashboardContent();
@@ -5905,7 +6009,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         child: ElevatedButton.icon(
                           onPressed: () {
                             Navigator.pop(sheetContext);
-                            setState(() => _section = 6);
+                            _goToSection(6);
                           },
                           icon: const Icon(Icons.list_rounded, size: 18),
                           label: const Text(
@@ -11094,6 +11198,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           _button('LISTO', context.colors.red, () async {
             await _saveLocalData();
             if (!mounted) return;
+            _sectionHistory.clear();
             setState(() => _section = 0);
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('✅ Configuración guardada')),
@@ -11409,7 +11514,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             if (alert['action'] == 'dashboard')
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: () => setState(() => _section = 0),
+                  onPressed: () {
+                    _sectionHistory.clear();
+                    setState(() => _section = 0);
+                  },
                   icon: const Icon(Icons.dashboard_rounded, size: 16),
                   label: const Text('VER DASHBOARD',
                       style: TextStyle(
