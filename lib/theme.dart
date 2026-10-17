@@ -2,251 +2,98 @@
 import 'package:flutter/material.dart';
 
 // ═══════════════════════════════════════════════════════════
-// PALETA DE COLORES — MODO OSCURO (Neón Cyberpunk)
+// EXTENSIÓN DE COLORES DINÁMICOS
 // ═══════════════════════════════════════════════════════════
-class DarkPalette {
-  static const Color bg = Color(0xFF020202);
-  static const Color panel = Color(0xFF070707);
-  static const Color panel2 = Color(0xFF0D0D0D);
-  static const Color border = Color(0xFF202020);
-  static const Color cardBg = Color(0xFF0F0F10);
-  static const Color cardBgSoft = Color(0xFF17181A);
-
-  static const Color red = Color(0xFFFF1744);
-  static const Color yellow = Color(0xFFFFEA00);
-  static const Color purple = Color(0xFFB000FF);
-  static const Color green = Color(0xFF00FF85);
-
-  static const Color white = Color(0xFFF4F4F5);
-  static const Color muted = Color(0xFF77777F);
-
-  static const Color orange = Color(0xFFFF7A00);
-  static const Color orangeSoft = Color(0xFFFFA34D);
-  static const Color blue = Color(0xFF2FB8FF);
-  static const Color cyan = Color(0xFF00E0FF);
-  static const Color lime = Color(0xFFB4FF39);
+extension ThemeColors on BuildContext {
+  AppColorScheme get colors {
+    // Si el controlador dice que es oscuro, devolvemos los colores oscuros
+    if (Theme.of(this).brightness == Brightness.dark) {
+      return const AppColorScheme(
+        bg: Color(0xFF0A0A0A),
+        panel: Color(0xFF1A1A1A),
+        panel2: Color(0xFF252525),
+        border: Color(0xFF2A2A2A),
+        white: Colors.white,
+        muted: Color(0xFF888888),
+        red: Color(0xFFFF1744),
+        green: Color(0xFF00E676),
+        blue: Color(0xFF2979FF),
+        yellow: Color(0xFFFFEA00),
+      );
+    } else {
+      // Si es claro, devolvemos colores claros
+      return const AppColorScheme(
+        bg: Color(0xFFF5F5F5),
+        panel: Color(0xFFFFFFFF),
+        panel2: Color(0xFFEEEEEE),
+        border: Color(0xFFDDDDDD),
+        white: Color(0xFF121212),
+        muted: Color(0xFF666666),
+        red: Color(0xFFD50000),
+        green: Color(0xFF00C853),
+        blue: Color(0xFF2962FF),
+        yellow: Color(0xFFFFAB00),
+      );
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
-// PALETA DE COLORES — MODO CLARO (Limpio, alto contraste)
+// CLASE DE COLORES PERSONALIZADOS
+// (Le cambié el nombre a AppColorScheme para no chocar con Flutter)
 // ═══════════════════════════════════════════════════════════
-class LightPalette {
-  static const Color bg = Color(0xFFF5F5F7);
-  static const Color panel = Color(0xFFFFFFFF);
-  static const Color panel2 = Color(0xFFF0F0F3);
-  static const Color border = Color(0xFFE0E0E5);
-  static const Color cardBg = Color(0xFFFFFFFF);
-  static const Color cardBgSoft = Color(0xFFF8F8FA);
-
-  static const Color red = Color(0xFFE0002B);
-  static const Color yellow = Color(0xFFD4A800);
-  static const Color purple = Color(0xFF8A00CC);
-  static const Color green = Color(0xFF00A855);
-
-  static const Color white = Color(0xFF1A1A1D);
-  static const Color muted = Color(0xFF6B6B75);
-
-  static const Color orange = Color(0xFFE06500);
-  static const Color orangeSoft = Color(0xFFE08040);
-  static const Color blue = Color(0xFF0088CC);
-  static const Color cyan = Color(0xFF00A0B8);
-  static const Color lime = Color(0xFF7FCC00);
-}
-
-// ═══════════════════════════════════════════════════════════
-// THEME EXTENSIONS — Para acceder a los colores dinámicamente
-// ═══════════════════════════════════════════════════════════
-class AppColors extends ThemeExtension<AppColors> {
+class AppColorScheme {
   final Color bg;
   final Color panel;
   final Color panel2;
   final Color border;
-  final Color cardBg;
-  final Color cardBgSoft;
-
-  final Color red;
-  final Color yellow;
-  final Color purple;
-  final Color green;
-
   final Color white;
   final Color muted;
-
-  final Color orange;
-  final Color orangeSoft;
+  final Color red;
+  final Color green;
   final Color blue;
-  final Color cyan;
-  final Color lime;
+  final Color yellow;
 
-  const AppColors({
+  const AppColorScheme({
     required this.bg,
     required this.panel,
     required this.panel2,
     required this.border,
-    required this.cardBg,
-    required this.cardBgSoft,
-    required this.red,
-    required this.yellow,
-    required this.purple,
-    required this.green,
     required this.white,
     required this.muted,
-    required this.orange,
-    required this.orangeSoft,
+    required this.red,
+    required this.green,
     required this.blue,
-    required this.cyan,
-    required this.lime,
+    required this.yellow,
   });
-
-  static const AppColors dark = AppColors(
-    bg: DarkPalette.bg,
-    panel: DarkPalette.panel,
-    panel2: DarkPalette.panel2,
-    border: DarkPalette.border,
-    cardBg: DarkPalette.cardBg,
-    cardBgSoft: DarkPalette.cardBgSoft,
-    red: DarkPalette.red,
-    yellow: DarkPalette.yellow,
-    purple: DarkPalette.purple,
-    green: DarkPalette.green,
-    white: DarkPalette.white,
-    muted: DarkPalette.muted,
-    orange: DarkPalette.orange,
-    orangeSoft: DarkPalette.orangeSoft,
-    blue: DarkPalette.blue,
-    cyan: DarkPalette.cyan,
-    lime: DarkPalette.lime,
-  );
-
-  static const AppColors light = AppColors(
-    bg: LightPalette.bg,
-    panel: LightPalette.panel,
-    panel2: LightPalette.panel2,
-    border: LightPalette.border,
-    cardBg: LightPalette.cardBg,
-    cardBgSoft: LightPalette.cardBgSoft,
-    red: LightPalette.red,
-    yellow: LightPalette.yellow,
-    purple: LightPalette.purple,
-    green: LightPalette.green,
-    white: LightPalette.white,
-    muted: LightPalette.muted,
-    orange: LightPalette.orange,
-    orangeSoft: LightPalette.orangeSoft,
-    blue: LightPalette.blue,
-    cyan: LightPalette.cyan,
-    lime: LightPalette.lime,
-  );
-
-  @override
-  AppColors copyWith({
-    Color? bg,
-    Color? panel,
-    Color? panel2,
-    Color? border,
-    Color? cardBg,
-    Color? cardBgSoft,
-    Color? red,
-    Color? yellow,
-    Color? purple,
-    Color? green,
-    Color? white,
-    Color? muted,
-    Color? orange,
-    Color? orangeSoft,
-    Color? blue,
-    Color? cyan,
-    Color? lime,
-  }) {
-    return AppColors(
-      bg: bg ?? this.bg,
-      panel: panel ?? this.panel,
-      panel2: panel2 ?? this.panel2,
-      border: border ?? this.border,
-      cardBg: cardBg ?? this.cardBg,
-      cardBgSoft: cardBgSoft ?? this.cardBgSoft,
-      red: red ?? this.red,
-      yellow: yellow ?? this.yellow,
-      purple: purple ?? this.purple,
-      green: green ?? this.green,
-      white: white ?? this.white,
-      muted: muted ?? this.muted,
-      orange: orange ?? this.orange,
-      orangeSoft: orangeSoft ?? this.orangeSoft,
-      blue: blue ?? this.blue,
-      cyan: cyan ?? this.cyan,
-      lime: lime ?? this.lime,
-    );
-  }
-
-  @override
-  AppColors lerp(ThemeExtension<AppColors>? other, double t) {
-    if (other is! AppColors) return this;
-    return AppColors(
-      bg: Color.lerp(bg, other.bg, t)!,
-      panel: Color.lerp(panel, other.panel, t)!,
-      panel2: Color.lerp(panel2, other.panel2, t)!,
-      border: Color.lerp(border, other.border, t)!,
-      cardBg: Color.lerp(cardBg, other.cardBg, t)!,
-      cardBgSoft: Color.lerp(cardBgSoft, other.cardBgSoft, t)!,
-      red: Color.lerp(red, other.red, t)!,
-      yellow: Color.lerp(yellow, other.yellow, t)!,
-      purple: Color.lerp(purple, other.purple, t)!,
-      green: Color.lerp(green, other.green, t)!,
-      white: Color.lerp(white, other.white, t)!,
-      muted: Color.lerp(muted, other.muted, t)!,
-      orange: Color.lerp(orange, other.orange, t)!,
-      orangeSoft: Color.lerp(orangeSoft, other.orangeSoft, t)!,
-      blue: Color.lerp(blue, other.blue, t)!,
-      cyan: Color.lerp(cyan, other.cyan, t)!,
-      lime: Color.lerp(lime, other.lime, t)!,
-    );
-  }
 }
 
 // ═══════════════════════════════════════════════════════════
-// THEME DATA — Para MaterialApp
+// TEMAS GLOBALES
+// (Ahora usan el ColorScheme REAL de Flutter)
 // ═══════════════════════════════════════════════════════════
 class AppTheme {
-  static ThemeData darkTheme() {
-    return ThemeData(
-      brightness: Brightness.dark,
-      scaffoldBackgroundColor: DarkPalette.bg,
-      primaryColor: DarkPalette.red,
-      colorScheme: const ColorScheme.dark(
-        primary: DarkPalette.red,
-        secondary: DarkPalette.purple,
-        surface: DarkPalette.panel,
-        error: DarkPalette.red,
-      ),
-      extensions: const <ThemeExtension<dynamic>>[AppColors.dark],
-      fontFamily: 'Roboto',
-    );
-  }
-
   static ThemeData lightTheme() {
     return ThemeData(
       brightness: Brightness.light,
-      scaffoldBackgroundColor: LightPalette.bg,
-      primaryColor: LightPalette.red,
+      scaffoldBackgroundColor: const Color(0xFFF5F5F5),
       colorScheme: const ColorScheme.light(
-        primary: LightPalette.red,
-        secondary: LightPalette.purple,
-        surface: LightPalette.panel,
-        error: LightPalette.red,
+        primary: Color(0xFFD50000),
+        secondary: Color(0xFF00C853),
       ),
-      extensions: const <ThemeExtension<dynamic>>[AppColors.light],
       fontFamily: 'Roboto',
     );
   }
-}
 
-// ═══════════════════════════════════════════════════════════
-// HELPER EXTENSION — Acceso rápido: context.colors.red
-// ═══════════════════════════════════════════════════════════
-extension ThemeColorsX on BuildContext {
-  AppColors get colors =>
-      Theme.of(this).extension<AppColors>() ?? AppColors.dark;
-
-  bool get isDark => Theme.of(this).brightness == Brightness.dark;
+  static ThemeData darkTheme() {
+    return ThemeData(
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: const Color(0xFF0A0A0A),
+      colorScheme: const ColorScheme.dark(
+        primary: Color(0xFFFF1744),
+        secondary: Color(0xFF00E676),
+      ),
+      fontFamily: 'Roboto',
+    );
+  }
 }

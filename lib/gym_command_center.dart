@@ -3,7 +3,6 @@ import 'dart:io' show File;
 import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +19,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'supabase_config.dart';
 import 'theme.dart';
 import 'theme_controller.dart';
+import 'home_mobile.dart';
 
 enum UserRole { none, admin, client }
 
@@ -51,55 +51,41 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   int capacity = 150;
   int inside = 0;
   bool loadingCheckins = false;
-
   int clientInsideCount = 0;
   bool clientLoadingAforo = false;
   int clientCapacity = 150;
   Timer? _aforoTimer;
-
   int clientStreak = 0;
   List<String> clientCheckinDates = [];
 
   double income = 0;
   int activeMembers = 0;
-
   String selectedCurrency = 'USD';
   bool showConversion = true;
   double usdToVes = 40.00;
   double eurToVes = 43.50;
   double copToVes = 0.01;
-
   String gymPhone = '+58 412 000 0000';
 
   final ScreenshotController _qrScreenshotController = ScreenshotController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final TextEditingController searchController = TextEditingController();
 
   String alertFilter = 'TODAS';
   Set<String> dismissedAlerts = {};
   String dismissedDate = '';
 
-  final List<Map<String, String>> availableCurrencies = [
-    {'code': 'USD', 'name': 'Dólar', 'symbol': '\$'},
-    {'code': 'EUR', 'name': 'Euro', 'symbol': '€'},
-    {'code': 'VES', 'name': 'Bolívar', 'symbol': 'Bs. '},
-    {'code': 'COP', 'name': 'Peso Colombiano', 'symbol': '\$'},
-  ];
-
-  final TextEditingController searchController = TextEditingController();
   String clientFilter = 'TODOS';
-
   String qrMode = 'DIARIO';
   String qrToken = '';
   DateTime qrGenerated = DateTime.now();
   DateTime qrExpires = DateTime.now();
-
   String financePeriod = 'MES';
   String transactionFilter = 'TODOS';
-
   int trainingTab = 0;
   String exerciseFilter = 'TODOS';
-
   bool loadingData = true;
+  bool _qrProcessing = false;
 
   List<Map<String, dynamic>> transactions = [];
   List<double> monthlyIncome = List<double>.filled(12, 0);
@@ -113,6 +99,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   List<Map<String, dynamic>> topPlans = [];
   List<Map<String, dynamic>> renewalRequests = [];
 
+  final List<Map<String, String>> availableCurrencies = [
+    {'code': 'USD', 'name': 'Dólar', 'symbol': '\$'},
+    {'code': 'EUR', 'name': 'Euro', 'symbol': '€'},
+    {'code': 'VES', 'name': 'Bolívar', 'symbol': 'Bs. '},
+    {'code': 'COP', 'name': 'Peso Colombiano', 'symbol': '\$'},
+  ];
+
   final List<String> monthLabels = [
     'ENE',
     'FEB',
@@ -125,7 +118,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     'SEP',
     'OCT',
     'NOV',
-    'DIC'
+    'DIC',
   ];
 
   final List<Map<String, dynamic>> members = [
@@ -418,11 +411,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   ];
 
   final List<Map<String, dynamic>> classTypes = [
-    {'id': 'ct1', 'name': 'YOGA', 'color': 0xFFB000FF, 'icon': 0xe4a4},
-    {'id': 'ct2', 'name': 'SPINNING', 'color': 0xFFFFEA00, 'icon': 0xe4a7},
+    {'id': 'ct1', 'name': 'YOGA', 'color': 0xFFFF1744, 'icon': 0xe4a4},
+    {'id': 'ct2', 'name': 'SPINNING', 'color': 0xFFFF1744, 'icon': 0xe4a7},
     {'id': 'ct3', 'name': 'CROSSFIT', 'color': 0xFFFF1744, 'icon': 0xe4a8},
-    {'id': 'ct4', 'name': 'BOXEO', 'color': 0xFF00FF85, 'icon': 0xe4a9},
-    {'id': 'ct5', 'name': 'PILATES', 'color': 0xFF00E0FF, 'icon': 0xe4aa},
+    {'id': 'ct4', 'name': 'BOXEO', 'color': 0xFFFF1744, 'icon': 0xe4a9},
+    {'id': 'ct5', 'name': 'PILATES', 'color': 0xFFFF1744, 'icon': 0xe4aa},
   ];
 
   final List<Map<String, dynamic>> classes = [
@@ -660,27 +653,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return inside / capacity;
   }
 
-  double get clientOccupancy {
-    if (clientCapacity == 0) return 0;
-    return clientInsideCount / clientCapacity;
-  }
-
-  String get clientAforoStatus {
-    if (clientCapacity == 0) return 'SIN DATOS';
-    final pct = clientInsideCount / clientCapacity;
-    if (pct >= 0.8) return 'LLENO';
-    if (pct >= 0.5) return 'MEDIO';
-    return 'TRANQUILO';
-  }
-
-  Color clientAforoColor(BuildContext context) {
-    if (clientCapacity == 0) return context.colors.muted;
-    final pct = clientInsideCount / clientCapacity;
-    if (pct >= 0.8) return context.colors.red;
-    if (pct >= 0.5) return context.colors.yellow;
-    return context.colors.green;
-  }
-
   List<Map<String, dynamic>> get filteredTransactions {
     if (transactionFilter == 'INGRESOS') {
       return transactions.where((t) => t['type'] == 'INGRESO').toList();
@@ -691,12 +663,8 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return transactions;
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // ALERTAS
-  // ═══════════════════════════════════════════════════════════
   List<Map<String, dynamic>> activeAlerts(BuildContext context) {
     final alerts = <Map<String, dynamic>>[];
-
     for (final m in members) {
       if (m['status'].toString().toUpperCase() == 'PENDIENTE') {
         final id = 'pendiente-${m['id']}';
@@ -706,14 +674,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           'type': 'PENDIENTE',
           'title': '${m['name']}',
           'subtitle': 'Nuevo registro · Esperando aprobación',
-          'color': context.colors.purple,
+          'color': context.colors.red,
           'icon': Icons.person_add_alt_1_rounded,
           'member': m,
           'action': 'approve_client',
         });
       }
     }
-
     for (final m in members) {
       if (m['status'].toString().toUpperCase() == 'VENCIDO') {
         final id = 'vencida-${m['id']}';
@@ -730,7 +697,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     }
-
     for (final m in members) {
       if (m['status'].toString().toUpperCase() == 'POR VENCER') {
         final id = 'porvencer-${m['id']}';
@@ -747,7 +713,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     }
-
     if (capacity > 0 && inside / capacity >= 0.8) {
       final id = 'aforo-alto';
       if (!dismissedAlerts.contains(id)) {
@@ -762,7 +727,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         });
       }
     }
-
     return alerts;
   }
 
@@ -791,9 +755,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     _saveLocalData();
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // LOGIN / PIN
-  // ═══════════════════════════════════════════════════════════
   bool get isPinLocked {
     if (pinLockedUntil == null) return false;
     return DateTime.now().isBefore(pinLockedUntil!);
@@ -860,7 +821,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       }
       return;
     }
-
     try {
       final supabase = Supabase.instance.client;
       final response = await supabase
@@ -868,7 +828,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           .select()
           .eq('cedula', cedula)
           .maybeSingle();
-
       if (response == null) {
         if (mounted) {
           final ctx = context;
@@ -881,7 +840,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         }
         return;
       }
-
       final member = {
         'id': response['id'],
         'name': response['name'] ?? '',
@@ -899,7 +857,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'assignedRoutine': response['assigned_routine'] ?? '',
         'assignedRoutineId': response['assigned_routine_id'] ?? '',
       };
-
       if (!mounted) return;
       setState(() {
         loggedClient = member;
@@ -929,7 +886,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final name = regNameController.text.trim();
     final cedula = regCedulaController.text.trim();
     final phone = regPhoneController.text.trim();
-
     if (name.isEmpty || cedula.isEmpty) {
       if (mounted) {
         final ctx = context;
@@ -942,7 +898,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       }
       return;
     }
-
     if (regSelectedPlan.isEmpty) {
       if (mounted) {
         final ctx = context;
@@ -955,18 +910,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       }
       return;
     }
-
     setState(() => regLoading = true);
-
     try {
       final supabase = Supabase.instance.client;
-
       final existing = await supabase
           .from('members')
           .select('id')
           .eq('cedula', cedula)
           .maybeSingle();
-
       if (existing != null) {
         if (mounted) {
           setState(() => regLoading = false);
@@ -980,10 +931,8 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         }
         return;
       }
-
       final now = DateTime.now();
       final qrCode = 'SYNTH-CLIENT-${now.millisecondsSinceEpoch}';
-
       final newMember = {
         'name': name,
         'cedula': cedula,
@@ -998,13 +947,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'last_visit': 'Sin registro',
         'qr_code': qrCode,
       };
-
       try {
         await supabase.from('members').insert(newMember);
       } catch (e) {
         debugPrint('⚠️ Error insertando miembro: $e');
       }
-
       setState(() {
         members.insert(0, {
           'id': 'local-${now.millisecondsSinceEpoch}',
@@ -1030,7 +977,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         regSelectedPlan = '';
         loginScreen = 'registered';
       });
-
       addActivity('NUEVO REGISTRO', name);
       await _saveLocalData();
     } catch (e) {
@@ -1123,7 +1069,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             ? 'Hola, soy $clientName. Quiero consultar sobre mi membresía en SYNTHETIX GYM.'
             : 'Hola, quiero consultar sobre SYNTHETIX GYM.');
     final url = 'https://wa.me/$cleanPhone?text=${Uri.encodeComponent(text)}';
-
     try {
       final uri = Uri.parse(url);
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -1154,17 +1099,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   Future<void> requestRenewal() async {
     final client = loggedClient;
     if (client == null) return;
-
     final name = client['name'].toString();
     final plan = client['plan'].toString();
     final expiry = client['expiry'].toString();
     final cedula = client['cedula'].toString();
-
     final customText =
         '🔄 SOLICITUD DE RENOVACIÓN\n\n👤 Cliente: $name\n🆔 Cédula: $cedula\n📋 Plan: $plan\n📅 Vence: $expiry\n\nQuiero renovar mi membresía.';
-
     await openGymWhatsApp(clientName: name, customText: customText);
-
     final notifId =
         'renewal-${client['id']}-${DateTime.now().millisecondsSinceEpoch}';
     setState(() {
@@ -1180,7 +1121,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       });
     });
     addActivity('RENOVACIÓN', '$name solicitó renovación');
-
     try {
       final supabase = Supabase.instance.client;
       await supabase.from('activities').insert({
@@ -1190,9 +1130,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     } catch (e) {
       debugPrint('⚠️ Error enviando notif renovación: $e');
     }
-
     await _saveLocalData();
-
     if (!mounted) return;
     final ctx = context;
     ScaffoldMessenger.of(ctx).showSnackBar(
@@ -1218,7 +1156,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           .select()
           .gte('created_at', startOfDayStr)
           .order('created_at', ascending: true);
-
       int entradas = 0;
       int salidas = 0;
       for (final row in response) {
@@ -1232,7 +1169,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       }
       final calculated = entradas - salidas;
       final finalInside = calculated < 0 ? 0 : calculated;
-
       if (!mounted) return;
       setState(() {
         clientInsideCount = finalInside;
@@ -1275,7 +1211,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           .eq('type', 'ENTRADA')
           .gte('created_at', sixtyDaysAgoStr)
           .order('created_at', ascending: false);
-
       final Set<String> uniqueDays = {};
       for (final row in response) {
         final d =
@@ -1285,11 +1220,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         uniqueDays.add(key);
       }
       final sortedDays = uniqueDays.toList()..sort((a, b) => b.compareTo(a));
-
       int streak = 0;
       DateTime cursor = DateTime.now();
       cursor = DateTime(cursor.year, cursor.month, cursor.day);
-
       for (int i = 0; i < 60; i++) {
         final key =
             '${cursor.year}-${cursor.month.toString().padLeft(2, '0')}-${cursor.day.toString().padLeft(2, '0')}';
@@ -1312,23 +1245,15 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CHECK-IN POR QR DEL GIMNASIO (CLIENTE)
-  // ═══════════════════════════════════════════════════════════
-  bool _qrProcessing = false;
-
   Future<void> _processGymQrScan(String scannedCode) async {
     if (_qrProcessing) return;
     if (loggedClient == null) return;
-
     _qrProcessing = true;
     final client = loggedClient!;
     final memberId = client['id'];
     final memberName = client['name'].toString();
     final status = client['status'].toString().toUpperCase();
-
     final isValid = scannedCode.startsWith('SYNTH-GYM-');
-
     if (!isValid) {
       _qrProcessing = false;
       if (!mounted) return;
@@ -1341,29 +1266,23 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       );
       return;
     }
-
     String type = 'ENTRADA';
     try {
       final supabase = Supabase.instance.client;
       final now = DateTime.now();
       final startOfDay = DateTime(now.year, now.month, now.day);
       final startOfDayStr = startOfDay.toIso8601String();
-
       final todayCheckins = await supabase
           .from('checkins')
           .select()
           .eq('member_id', memberId)
           .gte('created_at', startOfDayStr)
           .order('created_at', ascending: true);
-
       final lastType = todayCheckins.isNotEmpty
           ? todayCheckins.last['type'].toString().toUpperCase()
           : '';
-
       type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
-
       final isBlocked = status != 'ACTIVO';
-
       await supabase.from('checkins').insert({
         'member_id': memberId,
         'type': type,
@@ -1371,19 +1290,16 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'reason': isBlocked ? 'Membresía $status' : null,
         'registered_by': 'client_qr',
       });
-
       await supabase.from('activities').insert({
         'type': isBlocked ? 'BLOQUEADO' : type,
         'name': memberName,
       });
-
       if (type == 'ENTRADA' && !isBlocked) {
         final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
         await supabase.from('members').update({
           'attendance': attendance + 1,
           'last_visit': _formatDate(DateTime.now()),
         }).eq('id', memberId);
-
         if (mounted) {
           setState(() {
             loggedClient!['attendance'] = attendance + 1;
@@ -1400,14 +1316,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           });
         }
       }
-
       if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
-
       await loadActivities();
       await loadCheckins();
       await loadClientAforo();
       await _saveLocalData();
-
       if (!mounted) return;
       await _showAccessOverlay(
         success: !isBlocked,
@@ -1448,10 +1361,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     if (!mounted) return null;
     final color = success ? context.colors.green : context.colors.red;
     final icon = success ? Icons.check_circle_rounded : Icons.cancel_rounded;
-
     return showGeneralDialog(
       context: context,
       barrierDismissible: true,
+      barrierLabel: 'AccessOverlay',
       barrierColor: Colors.black.withValues(alpha: .85),
       transitionDuration: const Duration(milliseconds: 300),
       pageBuilder: (_, __, ___) => const SizedBox.shrink(),
@@ -1632,7 +1545,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 child: Row(
                   children: [
                     Icon(Icons.qr_code_scanner_rounded,
-                        color: sheetContext.colors.green, size: 26),
+                        color: sheetContext.colors.red, size: 26),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
@@ -1686,9 +1599,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // PERSISTENCIA LOCAL
-  // ═══════════════════════════════════════════════════════════
   Future<void> _saveLocalData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -1714,7 +1624,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       await prefs.setDouble('copToVes', copToVes);
       await prefs.setString('qrMode', qrMode);
       await prefs.setInt('capacity', capacity);
-      debugPrint('💾 Datos guardados localmente');
     } catch (e) {
       debugPrint('❌ Error guardando local: $e');
     }
@@ -1723,7 +1632,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   Future<void> _loadLocalData() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-
       final savedAdminPin = prefs.getString('adminPin');
       adminPin =
           (savedAdminPin != null && RegExp(r'^\d{4}$').hasMatch(savedAdminPin))
@@ -1732,33 +1640,24 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       if (savedAdminPin != adminPin) {
         await prefs.setString('adminPin', adminPin);
       }
-
       final savedGymPhone = prefs.getString('gymPhone');
       if (savedGymPhone != null && savedGymPhone.isNotEmpty) {
         gymPhone = savedGymPhone;
       }
-
       final savedCurrency = prefs.getString('selectedCurrency');
       if (savedCurrency != null) selectedCurrency = savedCurrency;
-
       final savedConversion = prefs.getBool('showConversion');
       if (savedConversion != null) showConversion = savedConversion;
-
       final savedUsd = prefs.getDouble('usdToVes');
       if (savedUsd != null && savedUsd > 0) usdToVes = savedUsd;
-
       final savedEur = prefs.getDouble('eurToVes');
       if (savedEur != null && savedEur > 0) eurToVes = savedEur;
-
       final savedCop = prefs.getDouble('copToVes');
       if (savedCop != null && savedCop > 0) copToVes = savedCop;
-
       final savedQrMode = prefs.getString('qrMode');
       if (savedQrMode != null) qrMode = savedQrMode;
-
       final savedCapacity = prefs.getInt('capacity');
       if (savedCapacity != null && savedCapacity > 0) capacity = savedCapacity;
-
       final todayKey = _formatDateForCode(DateTime.now());
       final savedDismissedDate = prefs.getString('dismissedDate') ?? '';
       if (savedDismissedDate != todayKey) {
@@ -1771,7 +1670,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         dismissedAlerts = saved.toSet();
         dismissedDate = savedDismissedDate;
       }
-
       final membersStr = prefs.getString('members');
       final plansStr = prefs.getString('plans');
       final transactionsStr = prefs.getString('transactions');
@@ -1783,7 +1681,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       final classTypesStr = prefs.getString('classTypes');
       final renewalStr = prefs.getString('renewalRequests');
       final savedInside = prefs.getInt('inside');
-
       if (membersStr != null) {
         final loaded = (jsonDecode(membersStr) as List)
             .map((e) => Map<String, dynamic>.from(e))
@@ -1872,25 +1769,18 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         }
       }
       if (savedInside != null) inside = savedInside;
-      debugPrint('📂 Datos cargados localmente');
     } catch (e) {
       debugPrint('❌ Error cargando local: $e');
     }
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // LOADERS SUPABASE
-  // ═══════════════════════════════════════════════════════════
   Future<void> loadMembers() async {
     try {
-      debugPrint('🔄 Cargando miembros desde Supabase...');
       final supabase = Supabase.instance.client;
       final response = await supabase
           .from('members')
           .select()
           .order('created_at', ascending: false);
-      debugPrint('📦 Miembros recibidos: ${response.length}');
-
       if (response.isNotEmpty) {
         final loaded = <Map<String, dynamic>>[];
         for (final row in response) {
@@ -1927,15 +1817,12 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   Future<void> loadPayments() async {
     try {
-      debugPrint('🔄 Cargando pagos desde Supabase...');
       final supabase = Supabase.instance.client;
       final response = await supabase
           .from('payments')
           .select(
               'id, member_id, amount, method, status, created_at, members(name, plan)')
           .order('created_at', ascending: false);
-      debugPrint('📦 Pagos recibidos: ${response.length}');
-
       final loaded = <Map<String, dynamic>>[];
       for (final row in response) {
         final memberData = row['members'];
@@ -1954,7 +1841,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           'created_at': createdAt,
         });
       }
-
       final calcMonthly = List<double>.filled(12, 0);
       final currentYear = DateTime.now().year;
       for (final t in loaded) {
@@ -1963,7 +1849,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           calcMonthly[d.month - 1] += (t['amount'] as num).toDouble();
         }
       }
-
       final calcMethods = <String, double>{
         'TARJETA': 0,
         'EFECTIVO': 0,
@@ -1979,7 +1864,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
               (calcMethods[m] ?? 0) + (t['amount'] as num).toDouble();
         }
       }
-
       final calcWeekly = List<double>.filled(4, 0);
       for (final t in loaded) {
         final d = t['created_at'] as DateTime;
@@ -1991,7 +1875,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           }
         }
       }
-
       final planSales = <String, Map<String, dynamic>>{};
       for (final t in loaded) {
         final concept = t['concept'].toString();
@@ -2004,11 +1887,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             (planSales[concept]!['revenue'] as double) +
                 (t['amount'] as num).toDouble();
       }
-
       final sortedPlans = planSales.entries.toList()
         ..sort((a, b) => (b.value['revenue'] as double)
             .compareTo(a.value['revenue'] as double));
-
       final loadedTopPlans = <Map<String, dynamic>>[];
       for (int i = 0; i < sortedPlans.length && i < 4; i++) {
         final e = sortedPlans[i];
@@ -2019,12 +1900,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           'colorIndex': i,
         });
       }
-
       double totalIngresos = 0;
       for (final t in loaded) {
         totalIngresos += (t['amount'] as num).toDouble();
       }
-
       if (!mounted) return;
       if (loaded.isNotEmpty) {
         setState(() {
@@ -2045,14 +1924,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   Future<void> loadPlans() async {
     try {
-      debugPrint('🔄 Cargando planes desde Supabase...');
       final supabase = Supabase.instance.client;
       final response = await supabase
           .from('plans')
           .select()
           .order('created_at', ascending: true);
-      debugPrint('📦 Planes recibidos: ${response.length}');
-
       if (response.isNotEmpty) {
         final loaded = <Map<String, dynamic>>[];
         for (final row in response) {
@@ -2078,15 +1954,12 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   Future<void> loadActivities() async {
     try {
-      debugPrint('🔄 Cargando actividades desde Supabase...');
       final supabase = Supabase.instance.client;
       final response = await supabase
           .from('activities')
           .select()
           .order('created_at', ascending: false)
           .limit(20);
-      debugPrint('📦 Actividades recibidas: ${response.length}');
-
       if (response.isNotEmpty) {
         final loaded = <Map<String, String>>[];
         for (final row in response) {
@@ -2113,7 +1986,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   Future<void> loadCheckins() async {
     try {
       if (mounted) setState(() => loadingCheckins = true);
-      debugPrint('🔄 Cargando checkins de hoy...');
       final supabase = Supabase.instance.client;
       final now = DateTime.now();
       final startOfDay = DateTime(now.year, now.month, now.day);
@@ -2123,8 +1995,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           .select()
           .gte('created_at', startOfDayStr)
           .order('created_at', ascending: true);
-      debugPrint('📦 Checkins recibidos: ${response.length}');
-
       int entradas = 0;
       int salidas = 0;
       for (final row in response) {
@@ -2156,7 +2026,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   }
 
   Future<void> _syncWithSupabase() async {
-    debugPrint('🔄 Sincronizando con Supabase...');
     try {
       Supabase.instance.client;
     } catch (_) {
@@ -2171,7 +2040,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         return;
       }
     }
-
     bool ready = false;
     for (int i = 0; i < 30; i++) {
       try {
@@ -2182,43 +2050,25 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         await Future.delayed(const Duration(milliseconds: 100));
       }
     }
-    if (!ready) {
-      debugPrint('⚠️ Supabase no disponible. Modo offline.');
-      return;
-    }
-
+    if (!ready) return;
     try {
       await loadPlans();
-    } catch (e) {
-      debugPrint('❌ Plans: $e');
-    }
+    } catch (_) {}
     try {
       await loadMembers();
-    } catch (e) {
-      debugPrint('❌ Members: $e');
-    }
+    } catch (_) {}
     try {
       await loadPayments();
-    } catch (e) {
-      debugPrint('❌ Payments: $e');
-    }
+    } catch (_) {}
     try {
       await loadActivities();
-    } catch (e) {
-      debugPrint('❌ Activities: $e');
-    }
+    } catch (_) {}
     try {
       await loadCheckins();
-    } catch (e) {
-      debugPrint('❌ Checkins: $e');
-    }
+    } catch (_) {}
     await _saveLocalData();
-    debugPrint('✅ Sincronización completa');
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // HELPERS
-  // ═══════════════════════════════════════════════════════════
   String _formatDate(DateTime d) {
     final now = DateTime.now();
     final diff = now.difference(d);
@@ -2260,7 +2110,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       'SEP',
       'OCT',
       'NOV',
-      'DIC'
+      'DIC',
     ];
     if (month < 1 || month > 12) return 'ENE';
     return months[month - 1];
@@ -2439,7 +2289,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         );
       },
     );
-
     if (confirm != true) return;
     setState(() {
       inside = 0;
@@ -2447,7 +2296,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     });
     addActivity('RESET AFORO', 'Contador reiniciado');
     await _saveLocalData();
-
     if (!mounted) return;
     final ctx = context;
     ScaffoldMessenger.of(ctx).showSnackBar(
@@ -2481,7 +2329,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     try {
       final Uint8List? imageBytes = await _qrScreenshotController.capture();
       if (imageBytes == null) return;
-
       if (kIsWeb) {
         final text = 'Accede con este QR: $qrToken\nVálido: $qrTimeLeft';
         await Clipboard.setData(ClipboardData(text: text));
@@ -2490,19 +2337,17 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           ScaffoldMessenger.of(ctx).showSnackBar(
             SnackBar(
               content: Text('QR copiado: $qrToken'),
-              backgroundColor: ctx.colors.purple,
+              backgroundColor: ctx.colors.blue,
             ),
           );
         }
         return;
       }
-
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
       final file = File(filePath);
       await file.writeAsBytes(imageBytes);
-
       await Share.shareXFiles(
         [XFile(filePath)],
         text: 'QR de acceso SYNTHETIX GYM\n$qrToken\n$qrTimeLeft',
@@ -2519,7 +2364,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final access = plan['access'].toString();
     final priceStr = formatPrice(price);
     final secondary = showConversion ? formatPriceSecondary(price) : '';
-
     final text = '''
 🏋️ SYNTHETIX GYM OS PRO
 ━━━━━━━━━━━━━━━━━━━━━
@@ -2531,7 +2375,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 ━━━━━━━━━━━━━━━━━━━━━
 ¡Inscríbete ya! 💪
 ''';
-
     try {
       if (kIsWeb) {
         await Clipboard.setData(ClipboardData(text: text));
@@ -2540,7 +2383,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           ScaffoldMessenger.of(ctx).showSnackBar(
             SnackBar(
               content: Text('Plan "$name" copiado.'),
-              backgroundColor: ctx.colors.purple,
+              backgroundColor: ctx.colors.blue,
             ),
           );
         }
@@ -2561,7 +2404,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     final ctx = context;
-
     setState(() {
       for (var m in members) {
         if (m['id'] == memberId) {
@@ -2574,16 +2416,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     });
     addActivity('APROBADO', member['name'].toString());
     await _saveLocalData();
-
     messenger.showSnackBar(
       SnackBar(
         content: Text('${member['name']} aprobado como ACTIVO'),
         backgroundColor: ctx.colors.green,
       ),
     );
-
     if (memberId.toString().startsWith('local-')) return;
-
     try {
       final supabase = Supabase.instance.client;
       await supabase.from('members').update({
@@ -2611,7 +2450,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     final ctx = context;
-
     try {
       final supabase = Supabase.instance.client;
       if (memberId != null && !memberId.toString().startsWith('local-')) {
@@ -2624,7 +2462,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           debugPrint('⚠️ Error asignando: $e');
         }
       }
-
       setState(() {
         for (var m in members) {
           if (m['id'] == memberId) {
@@ -2639,11 +2476,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         }
         routine['assigned'] = count;
       });
-
       addActivity('RUTINA ASIGNADA', '$routineName → $memberName');
       await _saveLocalData();
       await loadMembers();
-
       if (!mounted) return;
       messenger.showSnackBar(
         SnackBar(
@@ -2672,1624 +2507,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       ..sort((a, b) => a['time'].toString().compareTo(b['time'].toString()));
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // INIT / DISPOSE
-  // ═══════════════════════════════════════════════════════════
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      generateGymQr();
-      await _loadLocalData();
-      if (mounted) setState(() => loadingData = false);
-      _syncWithSupabase();
-    });
-  }
-
-  @override
-  void dispose() {
-    _aforoTimer?.cancel();
-    searchController.dispose();
-    pinController.dispose();
-    clientCedulaController.dispose();
-    regNameController.dispose();
-    regCedulaController.dispose();
-    regPhoneController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isMobile = MediaQuery.of(context).size.width < 850;
-    if (currentRole == UserRole.none) return _loginScreen();
-    if (currentRole == UserRole.client) return _clientHome();
-    return Scaffold(
-      key: _scaffoldKey,
-      backgroundColor: context.colors.bg,
-      drawer: isMobile ? _mobileDrawer() : null,
-      body: isMobile ? _mobile() : _desktop(),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // LOGIN
-  // ═══════════════════════════════════════════════════════════
-  Widget _loginScreen() {
-    return Scaffold(
-      backgroundColor: context.colors.bg,
-      body: Stack(
-        children: [
-          Positioned(
-            top: -150,
-            right: -150,
-            child: Container(
-              width: 400,
-              height: 400,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    context.colors.red.withValues(alpha: .18),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -200,
-            left: -150,
-            child: Container(
-              width: 450,
-              height: 450,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    context.colors.purple.withValues(alpha: .15),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 28,
-                  vertical: 32,
-                ),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 480),
-                  child: TweenAnimationBuilder<double>(
-                    duration: const Duration(milliseconds: 500),
-                    curve: Curves.easeOut,
-                    tween: Tween(begin: 0.0, end: 1.0),
-                    builder: (context, value, child) {
-                      return Opacity(
-                        opacity: value,
-                        child: Transform.translate(
-                          offset: Offset(0, 20 * (1 - value)),
-                          child: child,
-                        ),
-                      );
-                    },
-                    child: _loginContent(),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _loginContent() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _loginLogo(),
-        const SizedBox(height: 40),
-        if (loginScreen == 'choose') ...[
-          _loginRoleCard(
-            icon: Icons.shield_rounded,
-            title: 'ADMINISTRADOR',
-            subtitle: 'Acceso con PIN de seguridad',
-            color: context.colors.red,
-            onTap: () => setState(() => loginScreen = 'admin'),
-          ),
-          const SizedBox(height: 14),
-          _loginRoleCard(
-            icon: Icons.person_rounded,
-            title: 'CLIENTE',
-            subtitle: 'Ingresa con tu cédula',
-            color: context.colors.purple,
-            onTap: () => setState(() => loginScreen = 'client'),
-          ),
-        ] else if (loginScreen == 'admin') ...[
-          _loginHeader(
-            icon: Icons.shield_rounded,
-            title: 'ACCESO ADMIN',
-            subtitle: 'Ingresa tu PIN de 4 dígitos',
-            color: context.colors.red,
-          ),
-          const SizedBox(height: 32),
-          _pinInput(),
-          const SizedBox(height: 24),
-          _primaryButton(
-            text: isPinLocked ? 'BLOQUEADO ${pinLockSecondsLeft}s' : 'INGRESAR',
-            color: context.colors.red,
-            onTap: isPinLocked ? null : tryAdminLogin,
-            icon: Icons.arrow_forward_rounded,
-          ),
-          const SizedBox(height: 16),
-          _backLink(() => setState(() => loginScreen = 'choose')),
-        ] else if (loginScreen == 'client') ...[
-          _loginHeader(
-            icon: Icons.person_rounded,
-            title: 'ACCESO CLIENTE',
-            subtitle: 'Ingresa con tu número de cédula',
-            color: context.colors.purple,
-          ),
-          const SizedBox(height: 32),
-          _textInputField(
-            controller: clientCedulaController,
-            label: 'Cédula',
-            hint: 'Ej: 12345678',
-            icon: Icons.badge_rounded,
-            keyboard: TextInputType.number,
-            accentColor: context.colors.purple,
-          ),
-          const SizedBox(height: 24),
-          _primaryButton(
-            text: 'INGRESAR',
-            color: context.colors.purple,
-            onTap: tryClientLogin,
-            icon: Icons.arrow_forward_rounded,
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                  child: Container(height: 1, color: context.colors.border)),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  '¿NUEVO AQUÍ?',
-                  style: TextStyle(
-                    color: context.colors.muted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 2,
-                  ),
-                ),
-              ),
-              Expanded(
-                  child: Container(height: 1, color: context.colors.border)),
-            ],
-          ),
-          const SizedBox(height: 20),
-          InkWell(
-            borderRadius: BorderRadius.circular(14),
-            onTap: () => setState(() {
-              loginScreen = 'register';
-              regSelectedPlan = '';
-            }),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 20,
-                vertical: 18,
-              ),
-              decoration: BoxDecoration(
-                color: context.colors.panel2,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: context.colors.purple.withValues(alpha: .45),
-                  width: 1.5,
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.person_add_alt_1_rounded,
-                    color: context.colors.purple,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 10),
-                  Flexible(
-                    child: RichText(
-                      textAlign: TextAlign.center,
-                      text: TextSpan(
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: context.colors.muted,
-                        ),
-                        children: [
-                          const TextSpan(text: '¿No tienes cuenta? '),
-                          TextSpan(
-                            text: 'Regístrate aquí',
-                            style: TextStyle(
-                              color: context.colors.purple,
-                              fontWeight: FontWeight.w900,
-                              decoration: TextDecoration.underline,
-                              decorationColor: context.colors.purple,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          _backLink(() => setState(() => loginScreen = 'choose')),
-        ] else if (loginScreen == 'register') ...[
-          _loginHeader(
-            icon: Icons.rocket_launch_rounded,
-            title: 'CREAR CUENTA',
-            subtitle: 'Únete a Synthetix Gym OS',
-            color: context.colors.green,
-          ),
-          const SizedBox(height: 32),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'DATOS PERSONALES',
-              style: TextStyle(
-                color: context.colors.muted,
-                fontSize: 10,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 1.5,
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          _textInputField(
-            controller: regNameController,
-            label: 'Nombre completo',
-            hint: 'Ej: Juan Pérez',
-            icon: Icons.person_rounded,
-            accentColor: context.colors.green,
-          ),
-          const SizedBox(height: 12),
-          _textInputField(
-            controller: regCedulaController,
-            label: 'Cédula',
-            hint: 'Ej: 12345678',
-            icon: Icons.badge_rounded,
-            keyboard: TextInputType.number,
-            accentColor: context.colors.green,
-          ),
-          const SizedBox(height: 12),
-          _textInputField(
-            controller: regPhoneController,
-            label: 'Teléfono',
-            hint: 'Ej: +58 412 1234567',
-            icon: Icons.phone_rounded,
-            keyboard: TextInputType.phone,
-            accentColor: context.colors.green,
-          ),
-          const SizedBox(height: 28),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Row(
-              children: [
-                Icon(Icons.card_membership_rounded,
-                    color: context.colors.green, size: 16),
-                const SizedBox(width: 8),
-                Text(
-                  'SELECCIONA TU PLAN',
-                  style: TextStyle(
-                    color: context.colors.muted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          if (plans.isEmpty)
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: context.colors.panel2,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Center(
-                child: Text('No hay planes disponibles',
-                    style: TextStyle(color: context.colors.muted)),
-              ),
-            )
-          else
-            ...plans.map((p) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: _planSelectorCard(p),
-                )),
-          const SizedBox(height: 24),
-          _primaryButton(
-            text: regLoading ? 'ENVIANDO...' : 'ENVIAR REGISTRO',
-            color: context.colors.green,
-            onTap: regLoading ? null : tryClientRegister,
-            icon: Icons.send_rounded,
-            darkText: true,
-          ),
-          const SizedBox(height: 16),
-          _backLink(() => setState(() => loginScreen = 'client')),
-        ] else if (loginScreen == 'registered') ...[
-          Container(
-            padding: const EdgeInsets.all(32),
-            decoration: BoxDecoration(
-              color: context.colors.panel,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: context.colors.green.withValues(alpha: .45),
-                width: 1.5,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: context.colors.green.withValues(alpha: .12),
-                  blurRadius: 40,
-                ),
-              ],
-            ),
-            child: Column(
-              children: [
-                Container(
-                  width: 90,
-                  height: 90,
-                  decoration: BoxDecoration(
-                    color: context.colors.green.withValues(alpha: .12),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: context.colors.green.withValues(alpha: .35),
-                      width: 2,
-                    ),
-                  ),
-                  child: Icon(
-                    Icons.check_circle_rounded,
-                    color: context.colors.green,
-                    size: 50,
-                  ),
-                ),
-                const SizedBox(height: 22),
-                Text(
-                  '¡REGISTRO ENVIADO!',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Tu cuenta está PENDIENTE.\nEl administrador la aprobará pronto.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: context.colors.muted,
-                    fontSize: 13,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                _primaryButton(
-                  text: 'VOLVER AL INICIO',
-                  color: context.colors.green,
-                  onTap: () => setState(() => loginScreen = 'choose'),
-                  icon: Icons.home_rounded,
-                  darkText: true,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _loginLogo() {
-    return Column(
-      children: [
-        Container(
-          width: 88,
-          height: 88,
-          decoration: BoxDecoration(
-            color: context.colors.red,
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: [
-              BoxShadow(
-                color: context.colors.red.withValues(alpha: .45),
-                blurRadius: 35,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: const Icon(Icons.bolt_rounded, color: Colors.black, size: 50),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          'SYNTHETIX',
-          style: TextStyle(
-            color: context.colors.white,
-            fontSize: 28,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 4,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          'GYM OS PRO',
-          style: TextStyle(
-            color: context.colors.muted,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 3,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _loginHeader({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required Color color,
-  }) {
-    return Column(
-      children: [
-        Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: .12),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: color.withValues(alpha: .35),
-              width: 1.5,
-            ),
-          ),
-          child: Icon(icon, color: color, size: 30),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          title,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: context.colors.white,
-            fontSize: 20,
-            fontWeight: FontWeight.w900,
-            letterSpacing: 1.5,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          subtitle,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: context.colors.muted,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _loginRoleCard({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: context.colors.panel,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: color.withValues(alpha: .35),
-              width: 1.5,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: color.withValues(alpha: .08),
-                blurRadius: 25,
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: .15),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: color.withValues(alpha: .35),
-                  ),
-                ),
-                child: Icon(icon, color: color, size: 26),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(
-                Icons.arrow_forward_ios_rounded,
-                color: color,
-                size: 16,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _pinInput() {
-    return TextField(
-      controller: pinController,
-      obscureText: true,
-      keyboardType: TextInputType.number,
-      maxLength: 4,
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        color: context.colors.white,
-        fontSize: 28,
-        letterSpacing: 16,
-        fontWeight: FontWeight.w900,
-      ),
-      decoration: InputDecoration(
-        counterText: '',
-        hintText: '••••',
-        hintStyle: TextStyle(
-          color: context.colors.muted.withValues(alpha: .5),
-          letterSpacing: 16,
-        ),
-        filled: true,
-        fillColor: context.colors.panel2,
-        contentPadding: const EdgeInsets.symmetric(vertical: 22),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide(color: context.colors.border, width: 1.5),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide(color: context.colors.red, width: 2),
-        ),
-      ),
-    );
-  }
-
-  Widget _textInputField({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    required IconData icon,
-    required Color accentColor,
-    TextInputType? keyboard,
-  }) {
-    return TextField(
-      controller: controller,
-      keyboardType: keyboard,
-      style: TextStyle(
-        color: context.colors.white,
-        fontSize: 15,
-        fontWeight: FontWeight.w600,
-      ),
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        labelStyle: TextStyle(
-          color: context.colors.muted,
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-        ),
-        hintStyle: TextStyle(
-          color: context.colors.muted.withValues(alpha: .5),
-          fontSize: 13,
-        ),
-        prefixIcon: Icon(icon, color: accentColor, size: 20),
-        filled: true,
-        fillColor: context.colors.panel2,
-        contentPadding: const EdgeInsets.symmetric(
-          vertical: 18,
-          horizontal: 16,
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: context.colors.border, width: 1.5),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: accentColor, width: 2),
-        ),
-      ),
-    );
-  }
-
-  Widget _planSelectorCard(Map<String, dynamic> plan) {
-    final name = plan['name'].toString();
-    final price = (plan['price'] as num).toDouble();
-    final days = plan['days'].toString();
-    final access = plan['access'].toString();
-    final isSelected = regSelectedPlan == name;
-
-    Color planColor = context.colors.purple;
-    IconData planIcon = Icons.card_membership_rounded;
-    String? badge;
-
-    final lower = name.toLowerCase();
-    if (lower.contains('basic')) {
-      planColor = context.colors.yellow;
-      planIcon = Icons.star_border_rounded;
-    } else if (lower.contains('premium')) {
-      planColor = context.colors.red;
-      planIcon = Icons.workspace_premium_rounded;
-      badge = 'POPULAR';
-    } else if (lower.contains('elite')) {
-      planColor = context.colors.purple;
-      planIcon = Icons.diamond_rounded;
-    } else if (lower.contains('10')) {
-      planColor = context.colors.green;
-      planIcon = Icons.timer_rounded;
-    }
-
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: () => setState(() => regSelectedPlan = name),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? planColor.withValues(alpha: .12)
-                : context.colors.panel2,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: isSelected ? planColor : context.colors.border,
-              width: isSelected ? 2 : 1.2,
-            ),
-            boxShadow: isSelected
-                ? [
-                    BoxShadow(
-                      color: planColor.withValues(alpha: .25),
-                      blurRadius: 20,
-                    ),
-                  ]
-                : null,
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  color: planColor.withValues(alpha: .15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: planColor.withValues(alpha: .35),
-                  ),
-                ),
-                child: Icon(planIcon, color: planColor, size: 24),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          name.toUpperCase(),
-                          style: TextStyle(
-                            color: context.colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                        if (badge != null) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 7,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: planColor,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              badge,
-                              style: const TextStyle(
-                                color: Colors.black,
-                                fontSize: 8,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 0.8,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '$days días · $access',
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    formatPrice(price),
-                    style: TextStyle(
-                      color: planColor,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w900,
-                      height: 1,
-                    ),
-                  ),
-                  if (showConversion) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      formatPriceSecondary(price),
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(width: 10),
-              Container(
-                width: 24,
-                height: 24,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isSelected ? planColor : Colors.transparent,
-                  border: Border.all(
-                    color: isSelected ? planColor : context.colors.border,
-                    width: 2,
-                  ),
-                ),
-                child: isSelected
-                    ? const Icon(Icons.check_rounded,
-                        color: Colors.black, size: 16)
-                    : null,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _primaryButton({
-    required String text,
-    required Color color,
-    required VoidCallback? onTap,
-    IconData? icon,
-    bool darkText = false,
-  }) {
-    return SizedBox(
-      width: double.infinity,
-      height: 56,
-      child: ElevatedButton(
-        onPressed: onTap,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: color,
-          foregroundColor: darkText ? Colors.black : Colors.white,
-          elevation: 0,
-          disabledBackgroundColor: color.withValues(alpha: .4),
-          disabledForegroundColor:
-              (darkText ? Colors.black : Colors.white).withValues(alpha: .5),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              text,
-              style: const TextStyle(
-                fontWeight: FontWeight.w900,
-                fontSize: 14,
-                letterSpacing: 1,
-              ),
-            ),
-            if (icon != null) ...[
-              const SizedBox(width: 10),
-              Icon(icon, size: 18),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _backLink(VoidCallback onTap) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.arrow_back_rounded,
-                  color: context.colors.muted, size: 16),
-              const SizedBox(width: 8),
-              Text(
-                'Volver',
-                style: TextStyle(
-                  color: context.colors.muted,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // CLIENT HOME
-  // ═══════════════════════════════════════════════════════════
-  Widget _clientHome() {
-    final client = loggedClient;
-    if (client == null) {
-      return Scaffold(
-        backgroundColor: context.colors.bg,
-        body: Center(
-          child:
-              Text('Sin sesión', style: TextStyle(color: context.colors.muted)),
-        ),
-      );
-    }
-
-    final name = client['name']?.toString() ?? 'Cliente';
-    final routineName = client['assignedRoutine']?.toString() ?? '';
-    final status = (client['status']?.toString() ?? 'ACTIVO').toUpperCase();
-    final isBlocked = status != 'ACTIVO';
-    final statusColor = isBlocked ? context.colors.red : context.colors.green;
-    final plan = client['plan']?.toString() ?? '—';
-    final expiry = client['expiry']?.toString() ?? '—';
-    final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
-    final qrCode = client['qrCode']?.toString() ?? '';
-    final todayClasses = _classesToday();
-
-    return Scaffold(
-      backgroundColor: context.colors.bg,
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 40),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 54,
-                    height: 54,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [context.colors.purple, context.colors.red],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: context.colors.purple.withValues(alpha: .35),
-                          blurRadius: 18,
-                        ),
-                      ],
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      name.isEmpty ? '?' : name[0].toUpperCase(),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Hola,',
-                            style: TextStyle(
-                              color: context.colors.muted,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            )),
-                        const SizedBox(height: 2),
-                        Text(name,
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: -0.3,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: confirmLogout,
-                    icon: Icon(Icons.logout_rounded,
-                        color: context.colors.red, size: 22),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: context.colors.panel,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: statusColor.withValues(alpha: .35),
-                    width: 1.5,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: statusColor.withValues(alpha: .12),
-                      blurRadius: 20,
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 50,
-                      height: 50,
-                      decoration: BoxDecoration(
-                        color: statusColor.withValues(alpha: .12),
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                            color: statusColor.withValues(alpha: .35)),
-                      ),
-                      child: Icon(
-                        isBlocked
-                            ? Icons.block_rounded
-                            : Icons.verified_rounded,
-                        color: statusColor,
-                        size: 26,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('MI MEMBRESÍA',
-                              style: TextStyle(
-                                color: context.colors.muted,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 1.2,
-                              )),
-                          const SizedBox(height: 4),
-                          Text(plan,
-                              style: TextStyle(
-                                color: context.colors.white,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w900,
-                              )),
-                          const SizedBox(height: 2),
-                          Text('Vence: $expiry',
-                              style: TextStyle(
-                                color: context.colors.muted,
-                                fontSize: 11,
-                              )),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: statusColor.withValues(alpha: .12),
-                        borderRadius: BorderRadius.circular(30),
-                        border: Border.all(
-                            color: statusColor.withValues(alpha: .45)),
-                      ),
-                      child: Text(status,
-                          style: TextStyle(
-                            color: statusColor,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 1,
-                          )),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              _bigScanButton(),
-              const SizedBox(height: 16),
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(18),
-                  onTap: requestRenewal,
-                  child: Container(
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          context.colors.yellow.withValues(alpha: .18),
-                          context.colors.orange.withValues(alpha: .12),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: context.colors.yellow.withValues(alpha: .45),
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 46,
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: context.colors.yellow.withValues(alpha: .15),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color:
-                                  context.colors.yellow.withValues(alpha: .40),
-                            ),
-                          ),
-                          child: Icon(Icons.autorenew_rounded,
-                              color: context.colors.yellow, size: 24),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('RENOVAR MEMBRESÍA',
-                                  style: TextStyle(
-                                    color: context.colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 0.5,
-                                  )),
-                              const SizedBox(height: 3),
-                              Text('Solicita renovación al gimnasio',
-                                  style: TextStyle(
-                                    color: context.colors.muted,
-                                    fontSize: 11,
-                                  )),
-                            ],
-                          ),
-                        ),
-                        Icon(Icons.arrow_forward_ios_rounded,
-                            color: context.colors.yellow, size: 16),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(18),
-                  onTap: () => openGymWhatsApp(clientName: name),
-                  child: Container(
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      color: context.colors.panel,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: context.colors.green.withValues(alpha: .40),
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 46,
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: context.colors.green.withValues(alpha: .15),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color:
-                                  context.colors.green.withValues(alpha: .40),
-                            ),
-                          ),
-                          child: FaIcon(FontAwesomeIcons.whatsapp,
-                              color: context.colors.green, size: 24),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('CONTACTAR GIMNASIO',
-                                  style: TextStyle(
-                                    color: context.colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 0.5,
-                                  )),
-                              const SizedBox(height: 3),
-                              Text('Escríbenos por WhatsApp',
-                                  style: TextStyle(
-                                    color: context.colors.muted,
-                                    fontSize: 11,
-                                  )),
-                            ],
-                          ),
-                        ),
-                        Icon(Icons.arrow_forward_ios_rounded,
-                            color: context.colors.green, size: 16),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: _clientStatCard(
-                      icon: Icons.local_fire_department_rounded,
-                      color: context.colors.orange,
-                      value: '$clientStreak',
-                      label: clientStreak == 1 ? 'Día racha' : 'Días racha',
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _clientStatCard(
-                      icon: Icons.event_available_rounded,
-                      color: context.colors.purple,
-                      value: '$attendance',
-                      label: 'Asistencias',
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _clientStatCard(
-                      icon: Icons.qr_code_rounded,
-                      color: context.colors.green,
-                      value: '$clientInsideCount',
-                      label: 'Dentro ahora',
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              Container(
-                padding: const EdgeInsets.all(22),
-                decoration: BoxDecoration(
-                  color: context.colors.panel,
-                  borderRadius: BorderRadius.circular(22),
-                  border: Border.all(
-                    color: context.colors.purple.withValues(alpha: .35),
-                    width: 1.5,
-                  ),
-                ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.qr_code_2_rounded,
-                            color: context.colors.purple, size: 20),
-                        const SizedBox(width: 8),
-                        Text('MI QR PERSONAL',
-                            style: TextStyle(
-                              color: context.colors.purple,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.2,
-                            )),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: QrImageView(
-                        data: qrCode,
-                        size: 180,
-                        backgroundColor: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Text(
-                      qrCode,
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 1,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Muestra este QR al gimnasio si lo necesitas.',
-                      textAlign: TextAlign.center,
-                      style:
-                          TextStyle(color: context.colors.muted, fontSize: 10),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Icon(Icons.event_rounded,
-                      color: context.colors.cyan, size: 18),
-                  const SizedBox(width: 8),
-                  Text('CLASES DE HOY',
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1,
-                      )),
-                ],
-              ),
-              const SizedBox(height: 12),
-              if (todayClasses.isEmpty)
-                Container(
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: context.colors.panel,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: context.colors.border),
-                  ),
-                  child: Center(
-                    child: Text('No hay clases programadas hoy',
-                        style: TextStyle(
-                            color: context.colors.muted, fontSize: 12)),
-                  ),
-                )
-              else
-                ...todayClasses.map((c) => _classTodayCard(c)),
-              const SizedBox(height: 24),
-              if (routineName.isNotEmpty) ...[
-                Row(
-                  children: [
-                    Icon(Icons.fitness_center_rounded,
-                        color: context.colors.purple, size: 18),
-                    const SizedBox(width: 8),
-                    Text('MI RUTINA',
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1,
-                        )),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: context.colors.panel,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: context.colors.purple.withValues(alpha: .35),
-                      width: 1.5,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: context.colors.purple.withValues(alpha: .15),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: context.colors.purple.withValues(alpha: .35),
-                          ),
-                        ),
-                        child: Icon(Icons.fitness_center_rounded,
-                            color: context.colors.purple, size: 26),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Text(routineName,
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w900,
-                            )),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _bigScanButton() {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(22),
-        onTap: openClientQrScanner,
-        child: Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                context.colors.green,
-                context.colors.green.withValues(alpha: .65),
-              ],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(22),
-            boxShadow: [
-              BoxShadow(
-                color: context.colors.green.withValues(alpha: .40),
-                blurRadius: 30,
-                offset: const Offset(0, 12),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 60,
-                height: 60,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: .20),
-                  borderRadius: BorderRadius.circular(18),
-                ),
-                child: const Icon(Icons.qr_code_scanner_rounded,
-                    color: Colors.black, size: 34),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'ESCANEAR ACCESO',
-                      style: TextStyle(
-                        color: Colors.black.withValues(alpha: .85),
-                        fontSize: 17,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.5,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Escanea el QR del gimnasio para entrar o salir',
-                      style: TextStyle(
-                        color: Colors.black.withValues(alpha: .65),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.arrow_forward_rounded,
-                  color: Colors.black.withValues(alpha: .75), size: 24),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _clientStatCard({
-    required IconData icon,
-    required Color color,
-    required String value,
-    required String label,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(
-        children: [
-          Icon(icon, color: color, size: 22),
-          const SizedBox(height: 8),
-          Text(value,
-              style: TextStyle(
-                color: context.colors.white,
-                fontSize: 20,
-                fontWeight: FontWeight.w900,
-                height: 1,
-              )),
-          const SizedBox(height: 4),
-          Text(label,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: context.colors.muted,
-                fontSize: 9,
-                fontWeight: FontWeight.w700,
-              )),
-        ],
-      ),
-    );
-  }
-
-  Widget _classTodayCard(Map<String, dynamic> c) {
-    Color color = context.colors.purple;
-    for (final ct in classTypes) {
-      if (ct['name'].toString().toUpperCase() ==
-          c['type'].toString().toUpperCase()) {
-        color = Color(ct['color'] as int);
-        break;
-      }
-    }
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: .35), width: 1.2),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 55,
-            height: 55,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: .15),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: color.withValues(alpha: .35)),
-            ),
-            alignment: Alignment.center,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(c['time'].toString(),
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w900,
-                    )),
-              ],
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(c['name'].toString(),
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w900,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Icon(Icons.person_rounded,
-                        color: context.colors.muted, size: 12),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(c['trainer'].toString(),
-                          style: TextStyle(
-                              color: context.colors.muted, fontSize: 11),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Icon(Icons.room_rounded,
-                        color: context.colors.muted, size: 12),
-                    const SizedBox(width: 4),
-                    Text(c['room'].toString(),
-                        style: TextStyle(
-                            color: context.colors.muted, fontSize: 11)),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // CRUD MIEMBROS
-  // ═══════════════════════════════════════════════════════════
   void addMember() {
     final name = TextEditingController();
     final phone = TextEditingController();
     final cedula = TextEditingController();
     String plan = plans.isNotEmpty ? plans.first['name'].toString() : '';
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -4330,7 +2552,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     final now = DateTime.now();
                     final expiryDate = _calculateExpiryDate(plan, now);
                     final qrCode = 'SYNTH-CLIENT-${now.millisecondsSinceEpoch}';
-
                     final localMember = {
                       'id': 'local-${now.millisecondsSinceEpoch}',
                       'name': name.text.trim(),
@@ -4350,7 +2571,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       'assignedRoutine': '',
                       'assignedRoutineId': '',
                     };
-
                     setState(() {
                       members.insert(0, localMember);
                       activeMembers = members.length;
@@ -4411,7 +2631,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final expiry = TextEditingController(text: member['expiry'].toString());
     String plan = member['plan'].toString();
     String status = member['status'].toString();
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -4629,9 +2848,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD PAGOS
-  // ═══════════════════════════════════════════════════════════
   void newPayment() {
     if (members.isEmpty) {
       final ctx = context;
@@ -4643,11 +2859,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       );
       return;
     }
-
     final amount = TextEditingController();
     String memberName = members.first['name'].toString();
     String method = 'EFECTIVO';
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -4712,7 +2926,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         (memberData['payments'] as num?)?.toInt() ?? 0;
                     final currentTotal =
                         (memberData['totalPaid'] as num?)?.toDouble() ?? 0.0;
-
                     setState(() {
                       for (var m in members) {
                         if (m['name'] == memberName) {
@@ -4780,15 +2993,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD PLANES
-  // ═══════════════════════════════════════════════════════════
   void addPlan() {
     final name = TextEditingController();
     final price = TextEditingController();
     final days = TextEditingController();
     final access = TextEditingController(text: 'ILIMITADO');
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -4805,7 +3014,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               const SizedBox(height: 12),
               _field(access, 'Tipo de acceso'),
               const SizedBox(height: 24),
-              _button('CREAR PLAN', dialogContext.colors.purple, () async {
+              _button('CREAR PLAN', dialogContext.colors.red, () async {
                 final p = double.tryParse(price.text.replaceAll(',', '.'));
                 final d = int.tryParse(days.text);
                 if (name.text.trim().isEmpty || p == null || d == null) return;
@@ -4859,13 +3068,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final price = TextEditingController(text: plan['price'].toString());
     final days = TextEditingController(text: plan['days'].toString());
     final access = TextEditingController(text: plan['access'].toString());
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'EDITAR PLAN',
-          accent: dialogContext.colors.purple,
+          accent: dialogContext.colors.red,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -4877,7 +3085,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               const SizedBox(height: 12),
               _field(access, 'Tipo de acceso'),
               const SizedBox(height: 24),
-              _button('GUARDAR CAMBIOS', dialogContext.colors.purple, () async {
+              _button('GUARDAR CAMBIOS', dialogContext.colors.red, () async {
                 final p = double.tryParse(price.text.replaceAll(',', '.'));
                 final d = int.tryParse(days.text);
                 if (name.text.trim().isEmpty || p == null || d == null) return;
@@ -4914,7 +3122,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 } catch (e) {
                   debugPrint('⚠️ Plan editado solo local: $e');
                 }
-              }),
+              }, darkText: true),
             ],
           ),
         );
@@ -5013,16 +3221,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD RUTINAS
-  // ═══════════════════════════════════════════════════════════
   void addRoutine() {
     final name = TextEditingController();
     final duration = TextEditingController(text: '45');
     final exercisesCount = TextEditingController(text: '8');
     final equipment = TextEditingController(text: 'Sin equipamiento');
     String level = 'Principiante';
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -5108,7 +3312,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final equipment =
         TextEditingController(text: routine['equipment'].toString());
     String level = routine['level'].toString();
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -5261,25 +3464,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void showAssignRoutineDialog(Map<String, dynamic> routine) {
     final routineName = routine['name'].toString();
     final routineId = routine['id'].toString();
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'ASIGNAR RUTINA',
-          accent: dialogContext.colors.purple,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               final activeMembers = members
                   .where(
                       (m) => m['status'].toString().toUpperCase() == 'ACTIVO')
                   .toList();
-
               final assignedIds = members
                   .where((m) => m['assignedRoutineId'] == routineId)
                   .map((m) => m['id'])
                   .toSet();
-
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -5293,7 +3493,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     child: Row(
                       children: [
                         Icon(Icons.fitness_center_rounded,
-                            color: dialogContext.colors.purple, size: 20),
+                            color: dialogContext.colors.red, size: 20),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
@@ -5309,14 +3509,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 4),
                           decoration: BoxDecoration(
-                            color: dialogContext.colors.purple
-                                .withValues(alpha: .15),
+                            color:
+                                dialogContext.colors.red.withValues(alpha: .15),
                             borderRadius: BorderRadius.circular(20),
                           ),
                           child: Text(
                             '${assignedIds.length} asignados',
                             style: TextStyle(
-                              color: dialogContext.colors.purple,
+                              color: dialogContext.colors.red,
                               fontSize: 10,
                               fontWeight: FontWeight.w900,
                             ),
@@ -5353,7 +3553,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           final mName = m['name'].toString();
                           final initial =
                               mName.isEmpty ? '?' : mName[0].toUpperCase();
-
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 8),
                             child: Material(
@@ -5421,13 +3620,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                   padding: const EdgeInsets.all(12),
                                   decoration: BoxDecoration(
                                     color: hasIt
-                                        ? dialogContext.colors.purple
+                                        ? dialogContext.colors.red
                                             .withValues(alpha: .15)
                                         : dialogContext.colors.panel2,
                                     borderRadius: BorderRadius.circular(12),
                                     border: Border.all(
                                       color: hasIt
-                                          ? dialogContext.colors.purple
+                                          ? dialogContext.colors.red
                                               .withValues(alpha: .45)
                                           : dialogContext.colors.border,
                                     ),
@@ -5437,12 +3636,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                       CircleAvatar(
                                         radius: 18,
                                         backgroundColor: dialogContext
-                                            .colors.purple
+                                            .colors.red
                                             .withValues(alpha: .15),
                                         child: Text(
                                           initial,
                                           style: TextStyle(
-                                            color: dialogContext.colors.purple,
+                                            color: dialogContext.colors.red,
                                             fontWeight: FontWeight.w900,
                                             fontSize: 14,
                                           ),
@@ -5482,7 +3681,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   const SizedBox(height: 20),
                   _button(
                     'CERRAR',
-                    dialogContext.colors.purple,
+                    dialogContext.colors.red,
                     () {
                       Navigator.pop(dialogContext);
                       setState(() {});
@@ -5497,9 +3696,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD EJERCICIOS
-  // ═══════════════════════════════════════════════════════════
   void addExercise() {
     final name = TextEditingController();
     final sets = TextEditingController(text: '3');
@@ -5507,13 +3703,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final weight = TextEditingController(text: '0');
     String muscle = 'Pecho';
     String level = 'Principiante';
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO EJERCICIO',
-          accent: dialogContext.colors.purple,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               return Column(
@@ -5566,7 +3761,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     },
                   ),
                   const SizedBox(height: 24),
-                  _button('CREAR EJERCICIO', dialogContext.colors.purple,
+                  _button('CREAR EJERCICIO', dialogContext.colors.red,
                       () async {
                     if (name.text.trim().isEmpty) return;
                     final navigator = Navigator.of(dialogContext);
@@ -5609,7 +3804,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final weight = TextEditingController(text: exercise['weight'].toString());
     String muscle = exercise['muscle'].toString();
     String level = exercise['level'].toString();
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -5779,9 +3973,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD ENTRENADORES
-  // ═══════════════════════════════════════════════════════════
   void addTrainer() {
     final name = TextEditingController();
     final specialty = TextEditingController();
@@ -5789,13 +3980,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final clientsCtrl = TextEditingController(text: '0');
     final schedule = TextEditingController(text: '06:00 - 14:00');
     double rating = 5.0;
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO ENTRENADOR',
-          accent: dialogContext.colors.green,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               return Column(
@@ -5856,7 +4046,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     ),
                   ),
                   const SizedBox(height: 24),
-                  _button('CREAR ENTRENADOR', dialogContext.colors.green,
+                  _button('CREAR ENTRENADOR', dialogContext.colors.red,
                       () async {
                     if (name.text.trim().isEmpty) return;
                     final navigator = Navigator.of(dialogContext);
@@ -5908,7 +4098,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final schedule =
         TextEditingController(text: trainer['schedule'].toString());
     double rating = (trainer['rating'] as num?)?.toDouble() ?? 5.0;
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -6085,23 +4274,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD TIPOS DE CLASE
-  // ═══════════════════════════════════════════════════════════
   void addClassType() {
     final name = TextEditingController();
-    int selectedColor = 0xFFB000FF;
     int selectedIcon = 0xe4a4;
-    final availableColors = [
-      0xFFB000FF,
-      0xFFFFEA00,
-      0xFFFF1744,
-      0xFF00FF85,
-      0xFF00E0FF,
-      0xFFFF7A00,
-      0xFF2FB8FF,
-      0xFFB4FF39,
-    ];
     final availableIcons = [
       {'code': 0xe4a4, 'icon': Icons.self_improvement},
       {'code': 0xe4a7, 'icon': Icons.directions_bike},
@@ -6112,13 +4287,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       {'code': 0xe4ac, 'icon': Icons.sports_martial_arts},
       {'code': 0xe4ad, 'icon': Icons.sports_handball},
     ];
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'NUEVO TIPO DE CLASE',
-          accent: dialogContext.colors.orange,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               return Column(
@@ -6139,15 +4313,16 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           width: 50,
                           height: 50,
                           decoration: BoxDecoration(
-                            color: Color(selectedColor).withValues(alpha: .15),
+                            color:
+                                dialogContext.colors.red.withValues(alpha: .15),
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
-                              color:
-                                  Color(selectedColor).withValues(alpha: .35),
+                              color: dialogContext.colors.red
+                                  .withValues(alpha: .35),
                             ),
                           ),
                           child: Icon(_iconFromCodePoint(selectedIcon),
-                              color: Color(selectedColor), size: 26),
+                              color: dialogContext.colors.red, size: 26),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
@@ -6165,46 +4340,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('COLOR',
-                        style: TextStyle(
-                          color: dialogContext.colors.muted,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.2,
-                        )),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: availableColors.map((c) {
-                      final selected = selectedColor == c;
-                      return GestureDetector(
-                        onTap: () => setDialogState(() => selectedColor = c),
-                        child: Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: Color(c),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: selected
-                                  ? dialogContext.colors.white
-                                  : Colors.transparent,
-                              width: 3,
-                            ),
-                          ),
-                          child: selected
-                              ? const Icon(Icons.check_rounded,
-                                  color: Colors.white, size: 20)
-                              : null,
-                        ),
-                      );
-                    }).toList(),
                   ),
                   const SizedBox(height: 20),
                   Align(
@@ -6232,19 +4367,20 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           height: 44,
                           decoration: BoxDecoration(
                             color: selected
-                                ? Color(selectedColor).withValues(alpha: .20)
+                                ? dialogContext.colors.red
+                                    .withValues(alpha: .20)
                                 : dialogContext.colors.panel2,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
                               color: selected
-                                  ? Color(selectedColor)
+                                  ? dialogContext.colors.red
                                   : dialogContext.colors.border,
                               width: 2,
                             ),
                           ),
                           child: Icon(iconData,
                               color: selected
-                                  ? Color(selectedColor)
+                                  ? dialogContext.colors.red
                                   : dialogContext.colors.muted,
                               size: 22),
                         ),
@@ -6252,7 +4388,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     }).toList(),
                   ),
                   const SizedBox(height: 24),
-                  _button('CREAR TIPO', dialogContext.colors.orange, () async {
+                  _button('CREAR TIPO', dialogContext.colors.red, () async {
                     if (name.text.trim().isEmpty) return;
                     final navigator = Navigator.of(dialogContext);
                     final messenger = ScaffoldMessenger.of(dialogContext);
@@ -6262,7 +4398,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       classTypes.add({
                         'id': 'ct-${now.millisecondsSinceEpoch}',
                         'name': name.text.trim().toUpperCase(),
-                        'color': selectedColor,
+                        'color': 0xFFFF1744,
                         'icon': selectedIcon,
                       });
                     });
@@ -6287,18 +4423,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
 
   void editClassType(Map<String, dynamic> ct) {
     final name = TextEditingController(text: ct['name'].toString());
-    int selectedColor = ct['color'] as int;
     int selectedIcon = ct['icon'] as int;
-    final availableColors = [
-      0xFFB000FF,
-      0xFFFFEA00,
-      0xFFFF1744,
-      0xFF00FF85,
-      0xFF00E0FF,
-      0xFFFF7A00,
-      0xFF2FB8FF,
-      0xFFB4FF39,
-    ];
     final availableIcons = [
       {'code': 0xe4a4, 'icon': Icons.self_improvement},
       {'code': 0xe4a7, 'icon': Icons.directions_bike},
@@ -6309,7 +4434,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       {'code': 0xe4ac, 'icon': Icons.sports_martial_arts},
       {'code': 0xe4ad, 'icon': Icons.sports_handball},
     ];
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -6336,15 +4460,16 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           width: 50,
                           height: 50,
                           decoration: BoxDecoration(
-                            color: Color(selectedColor).withValues(alpha: .15),
+                            color:
+                                dialogContext.colors.red.withValues(alpha: .15),
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
-                              color:
-                                  Color(selectedColor).withValues(alpha: .35),
+                              color: dialogContext.colors.red
+                                  .withValues(alpha: .35),
                             ),
                           ),
                           child: Icon(_iconFromCodePoint(selectedIcon),
-                              color: Color(selectedColor), size: 26),
+                              color: dialogContext.colors.red, size: 26),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
@@ -6362,46 +4487,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 20),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('COLOR',
-                        style: TextStyle(
-                          color: dialogContext.colors.muted,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.2,
-                        )),
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: availableColors.map((c) {
-                      final selected = selectedColor == c;
-                      return GestureDetector(
-                        onTap: () => setDialogState(() => selectedColor = c),
-                        child: Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: Color(c),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: selected
-                                  ? dialogContext.colors.white
-                                  : Colors.transparent,
-                              width: 3,
-                            ),
-                          ),
-                          child: selected
-                              ? const Icon(Icons.check_rounded,
-                                  color: Colors.white, size: 20)
-                              : null,
-                        ),
-                      );
-                    }).toList(),
                   ),
                   const SizedBox(height: 20),
                   Align(
@@ -6429,19 +4514,20 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           height: 44,
                           decoration: BoxDecoration(
                             color: selected
-                                ? Color(selectedColor).withValues(alpha: .20)
+                                ? dialogContext.colors.red
+                                    .withValues(alpha: .20)
                                 : dialogContext.colors.panel2,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
                               color: selected
-                                  ? Color(selectedColor)
+                                  ? dialogContext.colors.red
                                   : dialogContext.colors.border,
                               width: 2,
                             ),
                           ),
                           child: Icon(iconData,
                               color: selected
-                                  ? Color(selectedColor)
+                                  ? dialogContext.colors.red
                                   : dialogContext.colors.muted,
                               size: 22),
                         ),
@@ -6457,7 +4543,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     final ctx = dialogContext;
                     setState(() {
                       ct['name'] = name.text.trim().toUpperCase();
-                      ct['color'] = selectedColor;
+                      ct['color'] = 0xFFFF1744;
                       ct['icon'] = selectedIcon;
                     });
                     navigator.pop();
@@ -6553,9 +4639,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CRUD CLASES
-  // ═══════════════════════════════════════════════════════════
   void addClass() {
     final name = TextEditingController();
     final capacityCtrl = TextEditingController(text: '20');
@@ -6565,13 +4648,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     String time = '08:00';
     String trainerName =
         trainers.isNotEmpty ? trainers.first['name'].toString() : '';
-
     showDialog(
       context: context,
       builder: (dialogContext) {
         return _dialog(
           title: 'NUEVA CLASE',
-          accent: dialogContext.colors.green,
+          accent: dialogContext.colors.red,
           child: StatefulBuilder(
             builder: (dialogContext, setDialogState) {
               return Column(
@@ -6649,7 +4731,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   _field(capacityCtrl, 'Cupo máximo',
                       keyboard: TextInputType.number),
                   const SizedBox(height: 24),
-                  _button('CREAR CLASE', dialogContext.colors.green, () async {
+                  _button('CREAR CLASE', dialogContext.colors.red, () async {
                     if (name.text.trim().isEmpty) return;
                     final navigator = Navigator.of(dialogContext);
                     final messenger = ScaffoldMessenger.of(dialogContext);
@@ -6695,7 +4777,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     String day = classItem['day'].toString();
     String time = classItem['time'].toString();
     String trainerName = classItem['trainer'].toString();
-
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -6888,9 +4969,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // MOBILE DRAWER
-  // ═══════════════════════════════════════════════════════════
   Widget _mobileDrawer() {
     final items = [
       [Icons.grid_view_rounded, 'Command Center'],
@@ -6902,7 +4980,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       [Icons.notifications_active_rounded, 'Alertas'],
       [Icons.settings_rounded, 'Configuración'],
     ];
-
     return Drawer(
       backgroundColor: context.colors.panel,
       child: SafeArea(
@@ -6918,15 +4995,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     decoration: BoxDecoration(
                       color: context.colors.red,
                       borderRadius: BorderRadius.circular(13),
-                      boxShadow: [
-                        BoxShadow(
-                          color: context.colors.red.withValues(alpha: .35),
-                          blurRadius: 22,
-                        ),
-                      ],
                     ),
                     child: const Icon(Icons.bolt_rounded,
-                        color: Colors.black, size: 28),
+                        color: Colors.white, size: 28),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -7053,6 +5124,50 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 color: Colors.transparent,
                 child: InkWell(
                   borderRadius: BorderRadius.circular(14),
+                  onTap: () => themeController.toggle(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 15),
+                    decoration: BoxDecoration(
+                      color: context.colors.panel2,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: context.colors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          themeController.isDark
+                              ? Icons.light_mode_rounded
+                              : Icons.dark_mode_rounded,
+                          color: context.colors.red,
+                          size: 22,
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            themeController.isDark
+                                ? 'Cambiar a modo claro'
+                                : 'Cambiar a modo oscuro',
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(14),
                   onTap: () {
                     Navigator.pop(context);
                     confirmLogout();
@@ -7120,9 +5235,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // DESKTOP
-  // ═══════════════════════════════════════════════════════════
   Widget _desktop() {
     return Row(
       children: [
@@ -7135,13 +5247,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: loadingData
                     ? Center(
                         child: CircularProgressIndicator(
-                            color: context.colors.green))
+                            color: context.colors.red))
                     : _content(),
               ),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _mobile() {
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      drawer: _mobileDrawer(),
+      body: loadingData
+          ? Center(child: CircularProgressIndicator(color: context.colors.red))
+          : _content(),
     );
   }
 
@@ -7156,7 +5278,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       [Icons.notifications_active_rounded, 'Alertas'],
       [Icons.settings_rounded, 'Configuración'],
     ];
-
     return Container(
       width: 260,
       color: context.colors.panel,
@@ -7171,15 +5292,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 decoration: BoxDecoration(
                   color: context.colors.red,
                   borderRadius: BorderRadius.circular(13),
-                  boxShadow: [
-                    BoxShadow(
-                      color: context.colors.red.withValues(alpha: .35),
-                      blurRadius: 22,
-                    ),
-                  ],
                 ),
                 child: const Icon(Icons.bolt_rounded,
-                    color: Colors.black, size: 27),
+                    color: Colors.white, size: 27),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -7271,10 +5386,47 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             color: Colors.transparent,
             child: InkWell(
               borderRadius: BorderRadius.circular(14),
-              onTap: confirmLogout,
+              onTap: () => themeController.toggle(),
               child: Container(
                 padding: const EdgeInsets.all(14),
                 margin: const EdgeInsets.only(bottom: 10),
+                decoration: BoxDecoration(
+                  color: context.colors.panel2,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      themeController.isDark
+                          ? Icons.light_mode_rounded
+                          : Icons.dark_mode_rounded,
+                      color: context.colors.red,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        themeController.isDark ? 'Modo claro' : 'Modo oscuro',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: confirmLogout,
+              child: Container(
+                padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: context.colors.red.withValues(alpha: .10),
                   borderRadius: BorderRadius.circular(14),
@@ -7298,30 +5450,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   ],
                 ),
               ),
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: context.colors.panel2,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: context.colors.border),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.shield_rounded,
-                    color: context.colors.green, size: 20),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text('SISTEMA OPERATIVO',
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                      )),
-                ),
-                CircleAvatar(radius: 4, backgroundColor: context.colors.green),
-              ],
             ),
           ),
         ],
@@ -7369,6 +5497,30 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             color: Colors.transparent,
             child: InkWell(
               borderRadius: BorderRadius.circular(13),
+              onTap: () => themeController.toggle(),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(13),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Icon(
+                  themeController.isDark
+                      ? Icons.light_mode_rounded
+                      : Icons.dark_mode_rounded,
+                  color: context.colors.red,
+                  size: 18,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(13),
               onTap: () => setState(() => _section = 7),
               child: Container(
                 padding:
@@ -7381,7 +5533,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: Row(
                   children: [
                     Icon(Icons.settings_rounded,
-                        color: context.colors.green, size: 18),
+                        color: context.colors.red, size: 18),
                     const SizedBox(width: 8),
                     Text('Config',
                         style: TextStyle(
@@ -7431,7 +5583,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              border: Border.all(color: context.colors.purple, width: 2),
+              border: Border.all(color: context.colors.red, width: 2),
             ),
             child: Center(
               child: Text('A',
@@ -7461,12 +5613,40 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       return isMobile ? _alertsPageMobile() : _alertsPage();
     }
     if (_section == 7) return _currencyPage();
+    if (isMobile) {
+      final ac = alertCount(context) + renewalRequests.length;
+      final activeCount = members
+          .where((m) => m['status'].toString().toUpperCase() == 'ACTIVO')
+          .length;
+      final expiringCount = members
+          .where((m) => m['status'].toString().toUpperCase() == 'POR VENCER')
+          .length;
+      final expiredCount = members
+          .where((m) => m['status'].toString().toUpperCase() == 'VENCIDO')
+          .length;
+      return AdminHomeMobile(
+        inside: inside,
+        capacity: capacity,
+        income: totalIncome,
+        activeMembers: activeCount,
+        expiringSoon: expiringCount,
+        expired: expiredCount,
+        activities: activities,
+        notificationCount: ac,
+        adminName: 'Admin',
+        onScan: showAccessScanner,
+        onNewPayment: newPayment,
+        onNewMember: addMember,
+        onOpenNotifications: showNotifications,
+        onOpenMore: () => _scaffoldKey.currentState?.openDrawer(),
+        onOpenMemberships: () => setState(() => _section = 3),
+        onOpenClients: () => setState(() => _section = 1),
+        onOpenFinance: () => setState(() => _section = 4),
+      );
+    }
     return _dashboardContent();
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // NOTIFICACIONES
-  // ═══════════════════════════════════════════════════════════
   void showNotifications() {
     showModalBottomSheet(
       context: context,
@@ -7478,7 +5658,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             final alerts = activeAlerts(sheetContext);
             final renewals =
                 renewalRequests.where((r) => r['read'] != true).toList();
-
             return Container(
               margin: EdgeInsets.only(
                   top: MediaQuery.of(sheetContext).padding.top + 40),
@@ -7757,9 +5936,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // DASHBOARD
-  // ═══════════════════════════════════════════════════════════
   Widget _dashboardContent() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -7783,7 +5959,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: _quickAction(
                   Icons.payments_rounded,
                   'NUEVO PAGO',
-                  context.colors.yellow,
+                  context.colors.green,
                   newPayment,
                   darkText: true,
                 ),
@@ -7793,7 +5969,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 child: _quickAction(
                   Icons.qr_code_scanner_rounded,
                   'ESCANEAR ACCESO',
-                  context.colors.purple,
+                  context.colors.blue,
                   showAccessScanner,
                 ),
               ),
@@ -7885,11 +6061,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       painter: _OccupancyPainter(
                         percentage: value,
                         trackColor: context.colors.border,
-                        progressColors: [
-                          context.colors.red,
-                          context.colors.purple,
-                          context.colors.green,
-                        ],
+                        progressColor: context.colors.red,
                       ),
                     );
                   },
@@ -7899,7 +6071,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     width: 80,
                     height: 80,
                     child: CircularProgressIndicator(
-                        color: context.colors.green, strokeWidth: 3),
+                        color: context.colors.red, strokeWidth: 3),
                   )
                 else
                   Column(
@@ -7938,12 +6110,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       childAspectRatio: 0.95,
       children: [
         _metric('INGRESOS', formatPrice(income), Icons.payments_rounded,
-            context.colors.yellow,
+            context.colors.green,
             trend: '+14.2%',
             subtitle: 'este mes',
             chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0]),
         _metric('MIEMBROS ACTIVOS', activeMembers.toString(),
-            Icons.people_alt_rounded, context.colors.purple,
+            Icons.people_alt_rounded, context.colors.blue,
             trend: '+8.4%',
             subtitle: 'vs mes anterior',
             chartData: const [0.5, 0.55, 0.6, 0.58, 0.7, 0.75, 0.85, 1.0]),
@@ -7982,12 +6154,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             )
           : Column(
               children: activities.take(5).map((a) {
-                Color color = context.colors.purple;
+                Color color = context.colors.blue;
                 if (a['type'] == 'ENTRADA') color = context.colors.green;
-                if (a['type'] == 'SALIDA') color = context.colors.cyan;
+                if (a['type'] == 'SALIDA') color = context.colors.blue;
                 if (a['type'] == 'PAGO') color = context.colors.yellow;
                 if (a['type'] == 'BLOQUEADO') color = context.colors.red;
-                if (a['type'] == 'RENOVACIÓN') color = context.colors.orange;
+                if (a['type'] == 'RENOVACIÓN') color = context.colors.yellow;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Container(
@@ -8065,7 +6237,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         width: 8,
                         height: 55,
                         decoration: BoxDecoration(
-                          color: context.colors.purple,
+                          color: context.colors.red,
                           borderRadius: BorderRadius.circular(5),
                         ),
                       ),
@@ -8093,7 +6265,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         children: [
                           Text(formatPrice(price),
                               style: TextStyle(
-                                color: context.colors.yellow,
+                                color: context.colors.green,
                                 fontWeight: FontWeight.w900,
                                 fontSize: 15,
                               )),
@@ -8119,7 +6291,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     final filtered = members.where((m) {
       return m['name'].toString().toLowerCase().contains(query);
     }).toList();
-
     return _card(
       title: 'MIEMBROS',
       action: 'AGREGAR',
@@ -8148,7 +6319,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               Color color = context.colors.green;
               if (status == 'POR VENCER') color = context.colors.yellow;
               if (status == 'VENCIDO') color = context.colors.red;
-              if (status == 'PENDIENTE') color = context.colors.purple;
+              if (status == 'PENDIENTE') color = context.colors.red;
               return Material(
                 color: Colors.transparent,
                 child: InkWell(
@@ -8245,313 +6416,70 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // ENTRENAMIENTO (DESKTOP)
-  // ═══════════════════════════════════════════════════════════
-  Widget _trainingPage() {
-    final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'TIPOS', 'HORARIO'];
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-          decoration: BoxDecoration(
-            color: context.colors.bg,
-            border: Border(bottom: BorderSide(color: context.colors.border)),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('ENTRENAMIENTO',
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.2,
-                        )),
-                    const SizedBox(height: 4),
-                    Text(
-                        'Rutinas · Ejercicios · Entrenadores · Tipos · Horario',
-                        style: TextStyle(
-                            color: context.colors.muted, fontSize: 12)),
+  Widget _loginScreen() {
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      body: Stack(
+        children: [
+          Positioned(
+            top: -150,
+            right: -150,
+            child: Container(
+              width: 400,
+              height: 400,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    context.colors.red.withValues(alpha: .18),
+                    Colors.transparent,
                   ],
                 ),
               ),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: List.generate(tabs.length, (i) {
-                    final active = trainingTab == i;
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 8),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(11),
-                          onTap: () => setState(() => trainingTab = i),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 18, vertical: 12),
-                            decoration: BoxDecoration(
-                              color: active
-                                  ? context.colors.purple.withValues(alpha: .15)
-                                  : context.colors.panel,
-                              borderRadius: BorderRadius.circular(11),
-                              border: Border.all(
-                                color: active
-                                    ? context.colors.purple
-                                        .withValues(alpha: .45)
-                                    : context.colors.border,
-                              ),
-                            ),
-                            child: Text(tabs[i],
-                                style: TextStyle(
-                                  color: active
-                                      ? context.colors.purple
-                                      : context.colors.muted,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1,
-                                )),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
+            ),
+          ),
+          Positioned(
+            bottom: -200,
+            left: -150,
+            child: Container(
+              width: 450,
+              height: 450,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    context.colors.blue.withValues(alpha: .15),
+                    Colors.transparent,
+                  ],
                 ),
               ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(28),
-            child: _trainingContentDesktop(),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _trainingContentDesktop() {
-    switch (trainingTab) {
-      case 0:
-        return _routinesTab();
-      case 1:
-        return _exercisesTab();
-      case 2:
-        return _trainersTab();
-      case 3:
-        return _classTypesTabDesktop();
-      case 4:
-        return _scheduleTab();
-      default:
-        return _routinesTab();
-    }
-  }
-
-  Widget _routinesTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('RUTINAS DISPONIBLES',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
             ),
-            ElevatedButton.icon(
-              onPressed: addRoutine,
-              icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('NUEVA RUTINA',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.red,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        if (routines.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
+          ),
+          SafeArea(
             child: Center(
-              child: Text('Sin rutinas creadas',
-                  style: TextStyle(color: context.colors.muted)),
-            ),
-          )
-        else
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final crossCount = constraints.maxWidth > 1100 ? 3 : 2;
-              return GridView.count(
-                crossAxisCount: crossCount,
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                childAspectRatio: 1.35,
-                children: routines.map((r) => _routineCard(r)).toList(),
-              );
-            },
-          ),
-      ],
-    );
-  }
-
-  Widget _routineCard(Map<String, dynamic> routine) {
-    final level = routine['level'].toString();
-    final levelColor = level == 'Principiante'
-        ? context.colors.green
-        : level == 'Intermedio'
-            ? context.colors.yellow
-            : context.colors.red;
-
-    final routineId = routine['id'].toString();
-    final assignedCount =
-        members.where((m) => m['assignedRoutineId'] == routineId).length;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(routine['name'].toString(),
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w900,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-              ),
-              PopupMenuButton<String>(
-                icon: Icon(Icons.more_vert_rounded,
-                    color: context.colors.muted, size: 20),
-                color: context.colors.panel2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  side: BorderSide(color: context.colors.border),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28,
+                  vertical: 32,
                 ),
-                onSelected: (value) {
-                  if (value == 'edit') editRoutine(routine);
-                  if (value == 'delete') deleteRoutine(routine);
-                  if (value == 'assign') showAssignRoutineDialog(routine);
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(
-                    value: 'assign',
-                    child: Row(
-                      children: [
-                        Icon(Icons.person_add_rounded,
-                            color: context.colors.purple, size: 16),
-                        const SizedBox(width: 10),
-                        Text('Asignar a cliente',
-                            style: TextStyle(color: context.colors.white)),
-                      ],
-                    ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 480),
+                  child: TweenAnimationBuilder<double>(
+                    duration: const Duration(milliseconds: 500),
+                    curve: Curves.easeOut,
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    builder: (context, value, child) {
+                      return Opacity(
+                        opacity: value,
+                        child: Transform.translate(
+                          offset: Offset(0, 20 * (1 - value)),
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: _loginContent(),
                   ),
-                  PopupMenuItem(
-                    value: 'edit',
-                    child: Row(
-                      children: [
-                        Icon(Icons.edit_rounded,
-                            color: context.colors.yellow, size: 16),
-                        const SizedBox(width: 10),
-                        Text('Editar',
-                            style: TextStyle(color: context.colors.white)),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'delete',
-                    child: Row(
-                      children: [
-                        Icon(Icons.delete_rounded,
-                            color: context.colors.red, size: 16),
-                        const SizedBox(width: 10),
-                        Text('Eliminar',
-                            style: TextStyle(color: context.colors.white)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              _statusChip(level, levelColor),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                decoration: BoxDecoration(
-                  color: context.colors.purple.withValues(alpha: .12),
-                  borderRadius: BorderRadius.circular(30),
                 ),
-                child: Text('$assignedCount asignados',
-                    style: TextStyle(
-                      color: context.colors.purple,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w900,
-                    )),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              _miniStat(Icons.timer_rounded, '${routine['duration']} min'),
-              const SizedBox(width: 12),
-              _miniStat(
-                  Icons.fitness_center_rounded, '${routine['exercises']} ej'),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(routine['equipment'].toString(),
-              style: TextStyle(color: context.colors.muted, fontSize: 10),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis),
-          const Spacer(),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => showAssignRoutineDialog(routine),
-              icon: const Icon(Icons.person_add_rounded, size: 14),
-              label: const Text('ASIGNAR',
-                  style: TextStyle(
-                      fontWeight: FontWeight.w900,
-                      fontSize: 10,
-                      letterSpacing: 0.5)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: context.colors.purple,
-                side: BorderSide(
-                    color: context.colors.purple.withValues(alpha: .45)),
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
               ),
             ),
           ),
@@ -8560,722 +6488,1386 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _miniStat(IconData icon, String text) {
-    return Row(
+  Widget _loginContent() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, color: context.colors.muted, size: 14),
-        const SizedBox(width: 5),
-        Text(text,
-            style: TextStyle(
-              color: context.colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-            )),
+        _loginLogo(),
+        const SizedBox(height: 40),
+        if (loginScreen == 'choose') ...[
+          _loginRoleCard(
+            icon: Icons.shield_rounded,
+            title: 'ADMINISTRADOR',
+            subtitle: 'Acceso con PIN de seguridad',
+            color: context.colors.red,
+            onTap: () => setState(() => loginScreen = 'admin'),
+          ),
+          const SizedBox(height: 14),
+          _loginRoleCard(
+            icon: Icons.person_rounded,
+            title: 'CLIENTE',
+            subtitle: 'Ingresa con tu cédula',
+            color: context.colors.blue,
+            onTap: () => setState(() => loginScreen = 'client'),
+          ),
+        ] else if (loginScreen == 'admin') ...[
+          _loginHeader(
+            icon: Icons.shield_rounded,
+            title: 'ACCESO ADMIN',
+            subtitle: 'Ingresa tu PIN de 4 dígitos',
+            color: context.colors.red,
+          ),
+          const SizedBox(height: 32),
+          _pinInput(),
+          const SizedBox(height: 24),
+          _primaryButton(
+            text: isPinLocked ? 'BLOQUEADO ${pinLockSecondsLeft}s' : 'INGRESAR',
+            color: context.colors.red,
+            onTap: isPinLocked ? null : tryAdminLogin,
+            icon: Icons.arrow_forward_rounded,
+          ),
+          const SizedBox(height: 16),
+          _backLink(() => setState(() => loginScreen = 'choose')),
+        ] else if (loginScreen == 'client') ...[
+          _loginHeader(
+            icon: Icons.person_rounded,
+            title: 'ACCESO CLIENTE',
+            subtitle: 'Ingresa con tu número de cédula',
+            color: context.colors.blue,
+          ),
+          const SizedBox(height: 32),
+          _textInputField(
+            controller: clientCedulaController,
+            label: 'Cédula',
+            hint: 'Ej: 12345678',
+            icon: Icons.badge_rounded,
+            keyboard: TextInputType.number,
+            accentColor: context.colors.blue,
+          ),
+          const SizedBox(height: 24),
+          _primaryButton(
+            text: 'INGRESAR',
+            color: context.colors.blue,
+            onTap: tryClientLogin,
+            icon: Icons.arrow_forward_rounded,
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              Expanded(
+                  child: Container(height: 1, color: context.colors.border)),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  '¿NUEVO AQUÍ?',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 2,
+                  ),
+                ),
+              ),
+              Expanded(
+                  child: Container(height: 1, color: context.colors.border)),
+            ],
+          ),
+          const SizedBox(height: 20),
+          InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => setState(() {
+              loginScreen = 'register';
+              regSelectedPlan = '';
+            }),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 20,
+                vertical: 18,
+              ),
+              decoration: BoxDecoration(
+                color: context.colors.panel2,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: context.colors.blue.withValues(alpha: .45),
+                  width: 1.5,
+                ),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.person_add_alt_1_rounded,
+                    color: context.colors.blue,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: RichText(
+                      textAlign: TextAlign.center,
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: context.colors.muted,
+                        ),
+                        children: [
+                          const TextSpan(text: '¿No tienes cuenta? '),
+                          TextSpan(
+                            text: 'Regístrate aquí',
+                            style: TextStyle(
+                              color: context.colors.blue,
+                              fontWeight: FontWeight.w900,
+                              decoration: TextDecoration.underline,
+                              decorationColor: context.colors.blue,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          _backLink(() => setState(() => loginScreen = 'choose')),
+        ] else if (loginScreen == 'register') ...[
+          _loginHeader(
+            icon: Icons.rocket_launch_rounded,
+            title: 'CREAR CUENTA',
+            subtitle: 'Únete a Synthetix Gym OS',
+            color: context.colors.green,
+          ),
+          const SizedBox(height: 32),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'DATOS PERSONALES',
+              style: TextStyle(
+                color: context.colors.muted,
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          _textInputField(
+            controller: regNameController,
+            label: 'Nombre completo',
+            hint: 'Ej: Juan Pérez',
+            icon: Icons.person_rounded,
+            accentColor: context.colors.green,
+          ),
+          const SizedBox(height: 12),
+          _textInputField(
+            controller: regCedulaController,
+            label: 'Cédula',
+            hint: 'Ej: 12345678',
+            icon: Icons.badge_rounded,
+            keyboard: TextInputType.number,
+            accentColor: context.colors.green,
+          ),
+          const SizedBox(height: 12),
+          _textInputField(
+            controller: regPhoneController,
+            label: 'Teléfono',
+            hint: 'Ej: +58 412 1234567',
+            icon: Icons.phone_rounded,
+            keyboard: TextInputType.phone,
+            accentColor: context.colors.green,
+          ),
+          const SizedBox(height: 28),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Row(
+              children: [
+                Icon(Icons.card_membership_rounded,
+                    color: context.colors.green, size: 16),
+                const SizedBox(width: 8),
+                Text(
+                  'SELECCIONA TU PLAN',
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          if (plans.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: context.colors.panel2,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: context.colors.border),
+              ),
+              child: Center(
+                child: Text('No hay planes disponibles',
+                    style: TextStyle(color: context.colors.muted)),
+              ),
+            )
+          else
+            ...plans.map((p) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _planSelectorCard(p),
+                )),
+          const SizedBox(height: 24),
+          _primaryButton(
+            text: regLoading ? 'ENVIANDO...' : 'ENVIAR REGISTRO',
+            color: context.colors.green,
+            onTap: regLoading ? null : tryClientRegister,
+            icon: Icons.send_rounded,
+            darkText: true,
+          ),
+          const SizedBox(height: 16),
+          _backLink(() => setState(() => loginScreen = 'client')),
+        ] else if (loginScreen == 'registered') ...[
+          Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              color: context.colors.panel,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: context.colors.green.withValues(alpha: .45),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: context.colors.green.withValues(alpha: .12),
+                  blurRadius: 40,
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                Container(
+                  width: 90,
+                  height: 90,
+                  decoration: BoxDecoration(
+                    color: context.colors.green.withValues(alpha: .12),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: context.colors.green.withValues(alpha: .35),
+                      width: 2,
+                    ),
+                  ),
+                  child: Icon(
+                    Icons.check_circle_rounded,
+                    color: context.colors.green,
+                    size: 50,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                Text(
+                  '¡REGISTRO ENVIADO!',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: context.colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Tu cuenta está PENDIENTE.\nEl administrador la aprobará pronto.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _primaryButton(
+                  text: 'VOLVER AL INICIO',
+                  color: context.colors.green,
+                  onTap: () => setState(() => loginScreen = 'choose'),
+                  icon: Icons.home_rounded,
+                  darkText: true,
+                ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
 
-  Widget _exercisesTab() {
-    final muscles = [
-      'TODOS',
-      'Pecho',
-      'Espalda',
-      'Piernas',
-      'Hombros',
-      'Brazos',
-      'Core'
-    ];
-    final filtered = exerciseFilter == 'TODOS'
-        ? exercises
-        : exercises.where((e) => e['muscle'] == exerciseFilter).toList();
-
+  Widget _loginLogo() {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('BIBLIOTECA DE EJERCICIOS',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
+        Container(
+          width: 88,
+          height: 88,
+          decoration: BoxDecoration(
+            color: context.colors.red,
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: [
+              BoxShadow(
+                color: context.colors.red.withValues(alpha: .45),
+                blurRadius: 35,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: const Icon(Icons.bolt_rounded, color: Colors.white, size: 50),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          'SYNTHETIX',
+          style: TextStyle(
+            color: context.colors.white,
+            fontSize: 28,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 4,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'GYM OS PRO',
+          style: TextStyle(
+            color: context.colors.muted,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 3,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _loginHeader({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+  }) {
+    return Column(
+      children: [
+        Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: .12),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: color.withValues(alpha: .35),
+              width: 1.5,
             ),
-            ElevatedButton.icon(
-              onPressed: addExercise,
-              icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('NUEVO EJERCICIO',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.purple,
-                foregroundColor: Colors.white,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13)),
+          ),
+          child: Icon(icon, color: color, size: 30),
+        ),
+        const SizedBox(height: 18),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: context.colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          subtitle,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: context.colors.muted,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _loginRoleCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: context.colors.panel,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: color.withValues(alpha: .35),
+              width: 1.5,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: .08),
+                blurRadius: 25,
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .15),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: color.withValues(alpha: .35),
+                  ),
+                ),
+                child: Icon(icon, color: color, size: 26),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.arrow_forward_ios_rounded,
+                color: color,
+                size: 16,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pinInput() {
+    return TextField(
+      controller: pinController,
+      obscureText: true,
+      keyboardType: TextInputType.number,
+      maxLength: 4,
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: context.colors.white,
+        fontSize: 28,
+        letterSpacing: 16,
+        fontWeight: FontWeight.w900,
+      ),
+      decoration: InputDecoration(
+        counterText: '',
+        hintText: '••••',
+        hintStyle: TextStyle(
+          color: context.colors.muted.withValues(alpha: .5),
+          letterSpacing: 16,
+        ),
+        filled: true,
+        fillColor: context.colors.panel2,
+        contentPadding: const EdgeInsets.symmetric(vertical: 22),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: context.colors.border, width: 1.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: context.colors.red, width: 2),
+        ),
+      ),
+    );
+  }
+
+  Widget _textInputField({
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+    required IconData icon,
+    required Color accentColor,
+    TextInputType? keyboard,
+  }) {
+    return TextField(
+      controller: controller,
+      keyboardType: keyboard,
+      style: TextStyle(
+        color: context.colors.white,
+        fontSize: 15,
+        fontWeight: FontWeight.w600,
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        labelStyle: TextStyle(
+          color: context.colors.muted,
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+        ),
+        hintStyle: TextStyle(
+          color: context.colors.muted.withValues(alpha: .5),
+          fontSize: 13,
+        ),
+        prefixIcon: Icon(icon, color: accentColor, size: 20),
+        filled: true,
+        fillColor: context.colors.panel2,
+        contentPadding: const EdgeInsets.symmetric(
+          vertical: 18,
+          horizontal: 16,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: context.colors.border, width: 1.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: accentColor, width: 2),
+        ),
+      ),
+    );
+  }
+
+  Widget _planSelectorCard(Map<String, dynamic> plan) {
+    final name = plan['name'].toString();
+    final price = (plan['price'] as num).toDouble();
+    final days = plan['days'].toString();
+    final access = plan['access'].toString();
+    final isSelected = regSelectedPlan == name;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => setState(() => regSelectedPlan = name),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? context.colors.red.withValues(alpha: .12)
+                : context.colors.panel2,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isSelected ? context.colors.red : context.colors.border,
+              width: isSelected ? 2 : 1.2,
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: context.colors.red.withValues(alpha: .15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: context.colors.red.withValues(alpha: .35),
+                  ),
+                ),
+                child: Icon(Icons.card_membership_rounded,
+                    color: context.colors.red, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name.toUpperCase(),
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '$days días · $access',
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    formatPrice(price),
+                    style: TextStyle(
+                      color: context.colors.red,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                      height: 1,
+                    ),
+                  ),
+                  if (showConversion) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      formatPriceSecondary(price),
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(width: 10),
+              Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isSelected ? context.colors.red : Colors.transparent,
+                  border: Border.all(
+                    color:
+                        isSelected ? context.colors.red : context.colors.border,
+                    width: 2,
+                  ),
+                ),
+                child: isSelected
+                    ? const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 16)
+                    : null,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _primaryButton({
+    required String text,
+    required Color color,
+    required VoidCallback? onTap,
+    IconData? icon,
+    bool darkText = false,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: ElevatedButton(
+        onPressed: onTap,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          disabledBackgroundColor: color.withValues(alpha: .4),
+          disabledForegroundColor: Colors.white.withValues(alpha: .5),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              text,
+              style: const TextStyle(
+                fontWeight: FontWeight.w900,
+                fontSize: 14,
+                letterSpacing: 1,
               ),
             ),
+            if (icon != null) ...[
+              const SizedBox(width: 10),
+              Icon(icon, size: 18),
+            ],
           ],
         ),
-        const SizedBox(height: 16),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
+      ),
+    );
+  }
+
+  Widget _backLink(VoidCallback onTap) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
-            children: muscles.map((m) {
-              final active = exerciseFilter == m;
-              return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(11),
-                    onTap: () => setState(() => exerciseFilter = m),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: active
-                            ? context.colors.purple.withValues(alpha: .15)
-                            : context.colors.panel,
-                        borderRadius: BorderRadius.circular(11),
-                        border: Border.all(
-                          color: active
-                              ? context.colors.purple.withValues(alpha: .45)
-                              : context.colors.border,
-                        ),
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_back_rounded,
+                  color: context.colors.muted, size: 16),
+              const SizedBox(width: 8),
+              Text(
+                'Volver',
+                style: TextStyle(
+                  color: context.colors.muted,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _clientHome() {
+    final client = loggedClient;
+    if (client == null) {
+      return Scaffold(
+        backgroundColor: context.colors.bg,
+        body: Center(
+          child:
+              Text('Sin sesión', style: TextStyle(color: context.colors.muted)),
+        ),
+      );
+    }
+    final name = client['name']?.toString() ?? 'Cliente';
+    final routineName = client['assignedRoutine']?.toString() ?? '';
+    final status = (client['status']?.toString() ?? 'ACTIVO').toUpperCase();
+    final isBlocked = status != 'ACTIVO';
+    final statusColor = isBlocked ? context.colors.red : context.colors.green;
+    final plan = client['plan']?.toString() ?? '—';
+    final expiry = client['expiry']?.toString() ?? '—';
+    final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
+    final qrCode = client['qrCode']?.toString() ?? '';
+    final todayClasses = _classesToday();
+    return Scaffold(
+      backgroundColor: context.colors.bg,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 40),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 54,
+                    height: 54,
+                    decoration: BoxDecoration(
+                      color: context.colors.red,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      name.isEmpty ? '?' : name[0].toUpperCase(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w900,
                       ),
-                      child: Text(m.toUpperCase(),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Hola,',
+                            style: TextStyle(
+                              color: context.colors.muted,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            )),
+                        const SizedBox(height: 2),
+                        Text(name,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: -0.3,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => themeController.toggle(),
+                    icon: Icon(
+                      themeController.isDark
+                          ? Icons.light_mode_rounded
+                          : Icons.dark_mode_rounded,
+                      color: context.colors.red,
+                      size: 22,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: confirmLogout,
+                    icon: Icon(Icons.logout_rounded,
+                        color: context.colors.red, size: 22),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: statusColor.withValues(alpha: .35),
+                    width: 1.5,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 50,
+                      height: 50,
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                            color: statusColor.withValues(alpha: .35)),
+                      ),
+                      child: Icon(
+                        isBlocked
+                            ? Icons.block_rounded
+                            : Icons.verified_rounded,
+                        color: statusColor,
+                        size: 26,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('MI MEMBRESÍA',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.2,
+                              )),
+                          const SizedBox(height: 4),
+                          Text(plan,
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                              )),
+                          const SizedBox(height: 2),
+                          Text('Vence: $expiry',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 11,
+                              )),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(
+                            color: statusColor.withValues(alpha: .45)),
+                      ),
+                      child: Text(status,
                           style: TextStyle(
-                            color: active
-                                ? context.colors.purple
-                                : context.colors.muted,
+                            color: statusColor,
                             fontSize: 10,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 1,
                           )),
                     ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(22),
+                  onTap: openClientQrScanner,
+                  child: Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: context.colors.red,
+                      borderRadius: BorderRadius.circular(22),
+                      boxShadow: [
+                        BoxShadow(
+                          color: context.colors.red.withValues(alpha: .40),
+                          blurRadius: 30,
+                          offset: const Offset(0, 12),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 60,
+                          height: 60,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: .20),
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                          child: const Icon(Icons.qr_code_scanner_rounded,
+                              color: Colors.white, size: 34),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'ESCANEAR ACCESO',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1.5,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Escanea el QR del gimnasio para entrar o salir',
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: .85),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.arrow_forward_rounded,
+                            color: Colors.white, size: 24),
+                      ],
+                    ),
                   ),
                 ),
-              );
-            }).toList(),
+              ),
+              const SizedBox(height: 16),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: requestRenewal,
+                  child: Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: context.colors.panel,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: context.colors.yellow.withValues(alpha: .45),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: context.colors.yellow.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Icon(Icons.autorenew_rounded,
+                              color: context.colors.yellow, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('RENOVAR MEMBRESÍA',
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                  )),
+                              const SizedBox(height: 3),
+                              Text('Solicita renovación al gimnasio',
+                                  style: TextStyle(
+                                    color: context.colors.muted,
+                                    fontSize: 11,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.arrow_forward_ios_rounded,
+                            color: context.colors.yellow, size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: () => openGymWhatsApp(clientName: name),
+                  child: Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: context.colors.panel,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: context.colors.green.withValues(alpha: .40),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: context.colors.green.withValues(alpha: .15),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: FaIcon(FontAwesomeIcons.whatsapp,
+                              color: context.colors.green, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('CONTACTAR GIMNASIO',
+                                  style: TextStyle(
+                                    color: context.colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                  )),
+                              const SizedBox(height: 3),
+                              Text('Escríbenos por WhatsApp',
+                                  style: TextStyle(
+                                    color: context.colors.muted,
+                                    fontSize: 11,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.arrow_forward_ios_rounded,
+                            color: context.colors.green, size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.local_fire_department_rounded,
+                      color: context.colors.yellow,
+                      value: '$clientStreak',
+                      label: clientStreak == 1 ? 'Día racha' : 'Días racha',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.event_available_rounded,
+                      color: context.colors.red,
+                      value: '$attendance',
+                      label: 'Asistencias',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _clientStatCard(
+                      icon: Icons.qr_code_rounded,
+                      color: context.colors.green,
+                      value: '$clientInsideCount',
+                      label: 'Dentro ahora',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              Container(
+                padding: const EdgeInsets.all(22),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(
+                    color: context.colors.red.withValues(alpha: .35),
+                    width: 1.5,
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.qr_code_2_rounded,
+                            color: context.colors.red, size: 20),
+                        const SizedBox(width: 8),
+                        Text('MI QR PERSONAL',
+                            style: TextStyle(
+                              color: context.colors.red,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1.2,
+                            )),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: QrImageView(
+                        data: qrCode,
+                        size: 180,
+                        backgroundColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      qrCode,
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Icon(Icons.event_rounded,
+                      color: context.colors.blue, size: 18),
+                  const SizedBox(width: 8),
+                  Text('CLASES DE HOY',
+                      style: TextStyle(
+                        color: context.colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1,
+                      )),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (todayClasses.isEmpty)
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Center(
+                    child: Text('No hay clases programadas hoy',
+                        style: TextStyle(
+                            color: context.colors.muted, fontSize: 12)),
+                  ),
+                )
+              else
+                ...todayClasses.map((c) => _classTodayCard(c)),
+              const SizedBox(height: 24),
+              if (routineName.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Icon(Icons.fitness_center_rounded,
+                        color: context.colors.red, size: 18),
+                    const SizedBox(width: 8),
+                    Text('MI RUTINA',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        )),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: context.colors.red.withValues(alpha: .35),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: context.colors.red.withValues(alpha: .15),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(Icons.fitness_center_rounded,
+                            color: context.colors.red, size: 26),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text(routineName,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w900,
+                            )),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 20),
+            ],
           ),
         ),
-        const SizedBox(height: 20),
-        if (filtered.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
-            child: Center(
-              child: Text('Sin ejercicios para este filtro',
-                  style: TextStyle(color: context.colors.muted)),
-            ),
-          )
-        else
-          Container(
-            decoration: BoxDecoration(
-              color: context.colors.panel,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: context.colors.border),
-            ),
-            child:
-                Column(children: filtered.map((e) => _exerciseRow(e)).toList()),
-          ),
-      ],
+      ),
     );
   }
 
-  Widget _exerciseRow(Map<String, dynamic> exercise) {
+  Widget _clientStatCard({
+    required IconData icon,
+    required Color color,
+    required String value,
+    required String label,
+  }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: context.colors.border)),
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(height: 8),
+          Text(value,
+              style: TextStyle(
+                color: context.colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                height: 1,
+              )),
+          const SizedBox(height: 4),
+          Text(label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: context.colors.muted,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+              )),
+        ],
+      ),
+    );
+  }
+
+  Widget _classTodayCard(Map<String, dynamic> c) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+            color: context.colors.red.withValues(alpha: .35), width: 1.2),
       ),
       child: Row(
         children: [
           Container(
-            width: 38,
-            height: 38,
+            width: 55,
+            height: 55,
             decoration: BoxDecoration(
-              color: context.colors.purple.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
+              color: context.colors.red.withValues(alpha: .15),
+              borderRadius: BorderRadius.circular(14),
+              border:
+                  Border.all(color: context.colors.red.withValues(alpha: .35)),
             ),
-            child: Icon(Icons.fitness_center_rounded,
-                color: context.colors.purple, size: 18),
+            alignment: Alignment.center,
+            child: Text(c['time'].toString(),
+                style: TextStyle(
+                  color: context.colors.red,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                )),
           ),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(exercise['name'].toString(),
+                Text(c['name'].toString(),
                     style: TextStyle(
                       color: context.colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                    )),
-                Text('${exercise['muscle']} · ${exercise['level']}',
-                    style:
-                        TextStyle(color: context.colors.muted, fontSize: 11)),
-              ],
-            ),
-          ),
-          _miniStat(
-              Icons.repeat_rounded, '${exercise['sets']}x${exercise['reps']}'),
-          const SizedBox(width: 16),
-          Text('${exercise['weight']} kg',
-              style: TextStyle(
-                color: context.colors.yellow,
-                fontSize: 12,
-                fontWeight: FontWeight.w900,
-              )),
-          const SizedBox(width: 8),
-          IconButton(
-            onPressed: () => editExercise(exercise),
-            icon: Icon(Icons.edit_rounded,
-                color: context.colors.yellow, size: 18),
-          ),
-          IconButton(
-            onPressed: () => deleteExercise(exercise),
-            icon:
-                Icon(Icons.delete_rounded, color: context.colors.red, size: 18),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trainersTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('EQUIPO DE ENTRENADORES',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
-            ),
-            ElevatedButton.icon(
-              onPressed: addTrainer,
-              icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('NUEVO ENTRENADOR',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.green,
-                foregroundColor: Colors.black,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        if (trainers.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
-            child: Center(
-              child: Text('Sin entrenadores registrados',
-                  style: TextStyle(color: context.colors.muted)),
-            ),
-          )
-        else
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final crossCount = constraints.maxWidth > 1100 ? 3 : 2;
-              return GridView.count(
-                crossAxisCount: crossCount,
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                childAspectRatio: 1.7,
-                children: trainers.map((t) => _trainerCard(t)).toList(),
-              );
-            },
-          ),
-      ],
-    );
-  }
-
-  Widget _trainerCard(Map<String, dynamic> trainer) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                      colors: [context.colors.purple, context.colors.red]),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                    trainer['name'].toString().substring(0, 1).toUpperCase(),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
+                      fontSize: 14,
                       fontWeight: FontWeight.w900,
-                    )),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(trainer['name'].toString(),
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w900,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                    Text(trainer['specialty'].toString(),
-                        style: TextStyle(
-                            color: context.colors.purple, fontSize: 11),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                  ],
-                ),
-              ),
-              PopupMenuButton<String>(
-                icon: Icon(Icons.more_vert_rounded,
-                    color: context.colors.muted, size: 20),
-                color: context.colors.panel2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  side: BorderSide(color: context.colors.border),
-                ),
-                onSelected: (value) {
-                  if (value == 'edit') editTrainer(trainer);
-                  if (value == 'delete') deleteTrainer(trainer);
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(
-                    value: 'edit',
-                    child: Row(
-                      children: [
-                        Icon(Icons.edit_rounded,
-                            color: context.colors.yellow, size: 16),
-                        const SizedBox(width: 10),
-                        Text('Editar',
-                            style: TextStyle(color: context.colors.white)),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'delete',
-                    child: Row(
-                      children: [
-                        Icon(Icons.delete_rounded,
-                            color: context.colors.red, size: 16),
-                        const SizedBox(width: 10),
-                        Text('Eliminar',
-                            style: TextStyle(color: context.colors.white)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const Spacer(),
-          Row(
-            children: [
-              Icon(Icons.star_rounded, color: context.colors.yellow, size: 16),
-              const SizedBox(width: 4),
-              Text(trainer['rating'].toString(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                  )),
-              const SizedBox(width: 16),
-              Icon(Icons.people_rounded, color: context.colors.muted, size: 14),
-              const SizedBox(width: 4),
-              Text('${trainer['clients']} clientes',
-                  style: TextStyle(color: context.colors.muted, fontSize: 11)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Icon(Icons.schedule_rounded,
-                  color: context.colors.green, size: 14),
-              const SizedBox(width: 6),
-              Text(trainer['schedule'].toString(),
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  )),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _classTypesTabDesktop() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('TIPOS DE CLASE',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
-            ),
-            ElevatedButton.icon(
-              onPressed: addClassType,
-              icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('NUEVO TIPO',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.orange,
-                foregroundColor: Colors.black,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        if (classTypes.isEmpty)
-          Padding(
-            padding: const EdgeInsets.all(40),
-            child: Center(
-              child: Text('Sin tipos de clase',
-                  style: TextStyle(color: context.colors.muted)),
-            ),
-          )
-        else
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final crossCount = constraints.maxWidth > 1100 ? 4 : 3;
-              return GridView.count(
-                crossAxisCount: crossCount,
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                childAspectRatio: 2.2,
-                children: classTypes.map((ct) => _classTypeCard(ct)).toList(),
-              );
-            },
-          ),
-      ],
-    );
-  }
-
-  Widget _classTypeCard(Map<String, dynamic> ct) {
-    final color = Color(ct['color'] as int);
-    final iconData = _iconFromCodePoint(ct['icon'] as int);
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withValues(alpha: .3)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: .15),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: color.withValues(alpha: .35)),
-            ),
-            alignment: Alignment.center,
-            child: Icon(iconData, color: color, size: 24),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(ct['name'].toString().toUpperCase(),
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 0.5,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 3),
-                Text(
-                    '#${color.value.toRadixString(16).substring(2).toUpperCase()}',
-                    style: TextStyle(
-                      color: context.colors.muted,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                    )),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(Icons.person_rounded,
+                        color: context.colors.muted, size: 12),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(c['trainer'].toString(),
+                          style: TextStyle(
+                              color: context.colors.muted, fontSize: 11),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Icon(Icons.room_rounded,
+                        color: context.colors.muted, size: 12),
+                    const SizedBox(width: 4),
+                    Text(c['room'].toString(),
+                        style: TextStyle(
+                            color: context.colors.muted, fontSize: 11)),
+                  ],
+                ),
               ],
             ),
           ),
-          PopupMenuButton<String>(
-            icon: Icon(Icons.more_vert_rounded,
-                color: context.colors.muted, size: 20),
-            color: context.colors.panel2,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-              side: BorderSide(color: context.colors.border),
-            ),
-            onSelected: (value) {
-              if (value == 'edit') editClassType(ct);
-              if (value == 'delete') deleteClassType(ct);
-            },
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: 'edit',
-                child: Row(
-                  children: [
-                    Icon(Icons.edit_rounded,
-                        color: context.colors.yellow, size: 16),
-                    const SizedBox(width: 10),
-                    Text('Editar',
-                        style: TextStyle(color: context.colors.white)),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'delete',
-                child: Row(
-                  children: [
-                    Icon(Icons.delete_rounded,
-                        color: context.colors.red, size: 16),
-                    const SizedBox(width: 10),
-                    Text('Eliminar',
-                        style: TextStyle(color: context.colors.white)),
-                  ],
-                ),
-              ),
-            ],
-          ),
         ],
       ),
     );
   }
 
-  Widget _scheduleTab() {
-    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text('CALENDARIO SEMANAL',
-                  style: TextStyle(
-                    color: context.colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
-            ),
-            ElevatedButton.icon(
-              onPressed: addClass,
-              icon: const Icon(Icons.add_rounded, size: 18),
-              label: const Text('NUEVA CLASE',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.green,
-                foregroundColor: Colors.black,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(13)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: days.map((day) {
-              final dayClasses = classes.where((c) => c['day'] == day).toList()
-                ..sort((a, b) =>
-                    a['time'].toString().compareTo(b['time'].toString()));
-              return Container(
-                width: 260,
-                margin: const EdgeInsets.only(right: 14),
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: context.colors.panel,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.calendar_today_rounded,
-                            color: context.colors.green, size: 16),
-                        const SizedBox(width: 8),
-                        Text(day,
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1,
-                            )),
-                      ],
-                    ),
-                    const SizedBox(height: 14),
-                    if (dayClasses.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 20),
-                        child: Text('Sin clases',
-                            style: TextStyle(
-                                color: context.colors.muted, fontSize: 11)),
-                      )
-                    else
-                      ...dayClasses.map((c) => _classSlot(c)),
-                  ],
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _classSlot(Map<String, dynamic> classItem) {
-    Color color = context.colors.purple;
-    for (final ct in classTypes) {
-      if (ct['name'].toString().toUpperCase() ==
-          classItem['type'].toString().toUpperCase()) {
-        color = Color(ct['color'] as int);
-        break;
-      }
-    }
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: context.colors.panel2,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(classItem['time'].toString(),
-                    style: TextStyle(
-                      color: color,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w900,
-                    )),
-              ),
-              const Spacer(),
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => editClass(classItem),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Icon(Icons.edit_rounded,
-                        color: context.colors.yellow, size: 16),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => deleteClass(classItem),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4),
-                    child: Icon(Icons.close_rounded,
-                        color: context.colors.red, size: 16),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(classItem['name'].toString(),
-              style: TextStyle(
-                color: context.colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w900,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 4),
-          Text(classItem['trainer'].toString(),
-              style: TextStyle(color: context.colors.muted, fontSize: 10),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: (classItem['capacity'] as int) == 0
-                        ? 0
-                        : (classItem['enrolled'] as int) /
-                            (classItem['capacity'] as int),
-                    minHeight: 4,
-                    backgroundColor: context.colors.border,
-                    valueColor: AlwaysStoppedAnimation(color),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text('${classItem['enrolled']}/${classItem['capacity']}',
-                  style: TextStyle(color: context.colors.muted, fontSize: 10)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // CLIENTES
-  // ═══════════════════════════════════════════════════════════
   Widget _clientsPage() {
     final isMobile = MediaQuery.of(context).size.width < 850;
     if (isMobile) return _clientsPageMobile();
@@ -9288,7 +7880,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       return m['name'].toString().toLowerCase().contains(query) ||
           m['phone'].toString().toLowerCase().contains(query);
     }).toList();
-
     if (clientFilter != 'TODOS') {
       filtered = filtered.where((m) {
         if (clientFilter == 'ACTIVOS') return m['status'] == 'ACTIVO';
@@ -9302,13 +7893,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         return true;
       }).toList();
     }
-
     final total = members.length;
     final totalActivos = members.where((m) => m['status'] == 'ACTIVO').length;
     final totalPorVencer =
         members.where((m) => m['status'] == 'POR VENCER').length;
     final totalVencidos = members.where((m) => m['status'] == 'VENCIDO').length;
-
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
       child: Column(
@@ -9351,7 +7940,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             Expanded(
               child: _clientStatCard(
                 icon: Icons.people_alt_rounded,
-                color: context.colors.purple,
+                color: context.colors.blue,
                 value: '$total',
                 label: 'Total',
               ),
@@ -9409,21 +7998,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               ),
             ),
           ),
-          const SizedBox(height: 14),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(children: [
-              _clientFilterChip('TODOS', 'Todos'),
-              const SizedBox(width: 8),
-              _clientFilterChip('PENDIENTES', 'Pendientes'),
-              const SizedBox(width: 8),
-              _clientFilterChip('ACTIVOS', 'Activos'),
-              const SizedBox(width: 8),
-              _clientFilterChip('POR VENCER', 'Por vencer'),
-              const SizedBox(width: 8),
-              _clientFilterChip('VENCIDOS', 'Vencidos'),
-            ]),
-          ),
           const SizedBox(height: 20),
           if (filtered.isEmpty)
             Container(
@@ -9457,48 +8031,17 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _clientFilterChip(String value, String label) {
-    final selected = clientFilter == value;
-    return GestureDetector(
-      onTap: () => setState(() => clientFilter = value),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected
-              ? context.colors.red.withValues(alpha: .15)
-              : context.colors.panel,
-          borderRadius: BorderRadius.circular(30),
-          border: Border.all(
-            color: selected
-                ? context.colors.red.withValues(alpha: .55)
-                : context.colors.border,
-            width: 1.2,
-          ),
-        ),
-        child: Text(label,
-            style: TextStyle(
-              color: selected ? context.colors.red : context.colors.muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-            )),
-      ),
-    );
-  }
-
   Widget _clientRowMobile(Map<String, dynamic> m) {
     final status = m['status'].toString();
     Color color = context.colors.green;
     if (status == 'POR VENCER') color = context.colors.yellow;
     if (status == 'VENCIDO') color = context.colors.red;
-    if (status == 'PENDIENTE') color = context.colors.purple;
-
+    if (status == 'PENDIENTE') color = context.colors.red;
     final name = m['name'].toString();
     final initial = name.isEmpty ? '?' : name[0].toUpperCase();
     final phone = m['phone'].toString();
     final plan = m['plan'].toString();
     final expiry = m['expiry'].toString();
-
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -9518,14 +8061,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 width: 50,
                 height: 50,
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                      colors: [color, color.withValues(alpha: .55)]),
+                  color: color.withValues(alpha: .15),
                   borderRadius: BorderRadius.circular(15),
                 ),
                 alignment: Alignment.center,
                 child: Text(initial,
-                    style: const TextStyle(
-                      color: Colors.black,
+                    style: TextStyle(
+                      color: color,
                       fontSize: 20,
                       fontWeight: FontWeight.w900,
                     )),
@@ -9644,7 +8186,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       return m['name'].toString().toLowerCase().contains(query) ||
           m['phone'].toString().toLowerCase().contains(query);
     }).toList();
-
     if (clientFilter != 'TODOS') {
       filtered = filtered.where((m) {
         if (clientFilter == 'ACTIVOS') return m['status'] == 'ACTIVO';
@@ -9658,13 +8199,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         return true;
       }).toList();
     }
-
     final total = members.length;
     final totalActivos = members.where((m) => m['status'] == 'ACTIVO').length;
     final totalPorVencer =
         members.where((m) => m['status'] == 'POR VENCER').length;
     final totalVencidos = members.where((m) => m['status'] == 'VENCIDO').length;
-
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -9717,7 +8256,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             childAspectRatio: 0.95,
             children: [
               _metric('TOTAL CLIENTES', total.toString(),
-                  Icons.people_alt_rounded, context.colors.purple,
+                  Icons.people_alt_rounded, context.colors.blue,
                   trend: '+12',
                   subtitle: 'todos',
                   chartData: const [
@@ -9847,8 +8386,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     Color color = context.colors.green;
     if (status == 'POR VENCER') color = context.colors.yellow;
     if (status == 'VENCIDO') color = context.colors.red;
-    if (status == 'PENDIENTE') color = context.colors.purple;
-
+    if (status == 'PENDIENTE') color = context.colors.red;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -9867,8 +8405,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 width: 54,
                 height: 54,
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                      colors: [color, color.withValues(alpha: .5)]),
+                  color: color.withValues(alpha: .15),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 alignment: Alignment.center,
@@ -9876,8 +8413,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     m['name'].toString().isEmpty
                         ? '?'
                         : m['name'].toString().substring(0, 1).toUpperCase(),
-                    style: const TextStyle(
-                      color: Colors.black,
+                    style: TextStyle(
+                      color: color,
                       fontSize: 22,
                       fontWeight: FontWeight.w900,
                     )),
@@ -9944,9 +8481,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // QR CENTER (ADMIN DESKTOP)
-  // ═══════════════════════════════════════════════════════════
   Widget _qrCenter() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -9981,8 +8515,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     fontSize: 12,
                   )),
               style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.green,
-                foregroundColor: Colors.black,
+                backgroundColor: context.colors.red,
+                foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                 shape: RoundedRectangleBorder(
@@ -10111,7 +8645,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                   fontSize: 11,
                                 )),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: context.colors.purple,
+                              backgroundColor: context.colors.red,
                               foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(vertical: 14),
                               shape: RoundedRectangleBorder(
@@ -10137,21 +8671,21 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             'DIARIO',
                             'Se regenera cada día',
                             Icons.calendar_today_rounded,
-                            context.colors.yellow,
+                            context.colors.red,
                           ),
                           const SizedBox(height: 8),
                           _modeOption(
                             'SEMANAL',
                             'Se regenera cada semana',
                             Icons.date_range_rounded,
-                            context.colors.purple,
+                            context.colors.red,
                           ),
                           const SizedBox(height: 8),
                           _modeOption(
                             'FIJO',
                             'No se regenera',
                             Icons.lock_rounded,
-                            context.colors.green,
+                            context.colors.red,
                           ),
                         ],
                       ),
@@ -10196,7 +8730,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       .where((a) => a['type'] == 'ENTRADA')
                       .length
                       .toString(),
-                  context.colors.purple),
+                  context.colors.blue),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -10305,8 +8839,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             const SizedBox(width: 12),
             Expanded(
               child: _button(
-                  'REGISTRAR SALIDA', context.colors.yellow, registerExit,
-                  darkText: true),
+                  'REGISTRAR SALIDA', context.colors.green, registerExit),
             ),
           ]),
         ],
@@ -10331,8 +8864,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           Text('Genera el código de acceso del gimnasio',
               style: TextStyle(color: context.colors.muted, fontSize: 12)),
           const SizedBox(height: 20),
-          _button('REGENERAR QR', context.colors.green, generateGymQr,
-              darkText: true),
+          _button('REGENERAR QR', context.colors.red, generateGymQr),
           const SizedBox(height: 20),
           _card(
             title: 'QR DEL GIMNASIO',
@@ -10401,7 +8933,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           style: TextStyle(
                               fontWeight: FontWeight.w900, fontSize: 10)),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: context.colors.purple,
+                        backgroundColor: context.colors.red,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
@@ -10416,13 +8948,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             title: 'MODO',
             child: Column(children: [
               _modeOption('DIARIO', 'Cada día', Icons.calendar_today_rounded,
-                  context.colors.yellow),
+                  context.colors.red),
               const SizedBox(height: 8),
               _modeOption('SEMANAL', 'Cada semana', Icons.date_range_rounded,
-                  context.colors.purple),
+                  context.colors.red),
               const SizedBox(height: 8),
               _modeOption(
-                  'FIJO', 'Nunca', Icons.lock_rounded, context.colors.green),
+                  'FIJO', 'Nunca', Icons.lock_rounded, context.colors.red),
             ]),
           ),
           const SizedBox(height: 20),
@@ -10438,7 +8970,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       .where((a) => a['type'] == 'ENTRADA')
                       .length
                       .toString(),
-                  context.colors.purple),
+                  context.colors.blue),
               const SizedBox(height: 12),
               _accessStat(
                   'BLOQUEADOS',
@@ -10462,16 +8994,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 20),
           _button('ESCANEAR CLIENTE', context.colors.red, showAccessScanner),
           const SizedBox(height: 10),
-          _button('REGISTRAR SALIDA', context.colors.yellow, registerExit,
-              darkText: true),
+          _button('REGISTRAR SALIDA', context.colors.green, registerExit),
         ],
       ),
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // PLANES
-  // ═══════════════════════════════════════════════════════════
   Widget _plansPage() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -10506,7 +9034,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     fontSize: 12,
                   )),
               style: ElevatedButton.styleFrom(
-                backgroundColor: context.colors.purple,
+                backgroundColor: context.colors.red,
                 foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -10541,32 +9069,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               itemBuilder: (context, index) {
                 final p = plans[index];
                 final price = (p['price'] as num).toDouble();
-                final name = p['name'].toString();
-                Color planColor = context.colors.purple;
-                IconData planIcon = Icons.card_membership_rounded;
-                String? badgeText;
-                if (name.toLowerCase().contains('basic')) {
-                  planColor = context.colors.yellow;
-                  planIcon = Icons.star_border_rounded;
-                } else if (name.toLowerCase().contains('premium')) {
-                  planColor = context.colors.red;
-                  planIcon = Icons.workspace_premium_rounded;
-                  badgeText = 'MÁS POPULAR';
-                } else if (name.toLowerCase().contains('elite')) {
-                  planColor = context.colors.purple;
-                  planIcon = Icons.diamond_rounded;
-                } else if (name.toLowerCase().contains('10')) {
-                  planColor = context.colors.green;
-                  planIcon = Icons.timer_rounded;
-                }
-                return _planCardPro(
-                  plan: p,
-                  price: price,
-                  name: name,
-                  planColor: planColor,
-                  planIcon: planIcon,
-                  badgeText: badgeText,
-                );
+                return _planCardPro(plan: p, price: price);
               },
             ),
         ],
@@ -10591,7 +9094,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             IconButton(
               onPressed: addPlan,
               icon: Icon(Icons.add_circle_rounded,
-                  color: context.colors.purple, size: 30),
+                  color: context.colors.red, size: 30),
             ),
           ]),
           const SizedBox(height: 15),
@@ -10610,21 +9113,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ...plans.map((p) {
               final price = (p['price'] as num).toDouble();
               final name = p['name'].toString();
-              Color planColor = context.colors.purple;
-              IconData planIcon = Icons.card_membership_rounded;
-              if (name.toLowerCase().contains('basic')) {
-                planColor = context.colors.yellow;
-                planIcon = Icons.star_border_rounded;
-              } else if (name.toLowerCase().contains('premium')) {
-                planColor = context.colors.red;
-                planIcon = Icons.workspace_premium_rounded;
-              } else if (name.toLowerCase().contains('elite')) {
-                planColor = context.colors.purple;
-                planIcon = Icons.diamond_rounded;
-              } else if (name.toLowerCase().contains('10')) {
-                planColor = context.colors.green;
-                planIcon = Icons.timer_rounded;
-              }
               return Container(
                 margin: const EdgeInsets.only(bottom: 14),
                 padding: const EdgeInsets.all(20),
@@ -10632,7 +9120,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   color: context.colors.panel,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                      color: planColor.withValues(alpha: .35), width: 1.5),
+                      color: context.colors.red.withValues(alpha: .35),
+                      width: 1.5),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -10642,12 +9131,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         width: 42,
                         height: 42,
                         decoration: BoxDecoration(
-                          color: planColor.withValues(alpha: .15),
+                          color: context.colors.red.withValues(alpha: .15),
                           borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                              color: planColor.withValues(alpha: .35)),
                         ),
-                        child: Icon(planIcon, color: planColor, size: 22),
+                        child: Icon(Icons.card_membership_rounded,
+                            color: context.colors.red, size: 22),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -10703,7 +9191,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     const SizedBox(height: 16),
                     Text(formatPrice(price),
                         style: TextStyle(
-                          color: planColor,
+                          color: context.colors.red,
                           fontSize: 34,
                           fontWeight: FontWeight.w900,
                           height: 1.0,
@@ -10734,8 +9222,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               letterSpacing: 0.5,
                             )),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: planColor,
-                          foregroundColor: Colors.black,
+                          backgroundColor: context.colors.red,
+                          foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12)),
@@ -10754,168 +9242,138 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _planCardPro({
     required Map<String, dynamic> plan,
     required double price,
-    required String name,
-    required Color planColor,
-    required IconData planIcon,
-    String? badgeText,
   }) {
+    final name = plan['name'].toString();
     return Container(
       decoration: BoxDecoration(
         color: context.colors.panel,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: planColor.withValues(alpha: .35), width: 1.5),
+        border: Border.all(
+            color: context.colors.red.withValues(alpha: .35), width: 1.5),
         boxShadow: [
           BoxShadow(
-            color: planColor.withValues(alpha: .08),
+            color: context.colors.red.withValues(alpha: .08),
             blurRadius: 30,
             offset: const Offset(0, 10),
           ),
         ],
       ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: planColor.withValues(alpha: .15),
-                      borderRadius: BorderRadius.circular(14),
-                      border:
-                          Border.all(color: planColor.withValues(alpha: .35)),
-                    ),
-                    child: Icon(planIcon, color: planColor, size: 26),
-                  ),
-                  const Spacer(),
-                  PopupMenuButton<String>(
-                    icon: Icon(Icons.more_vert_rounded,
-                        color: context.colors.muted, size: 20),
-                    color: context.colors.panel2,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                      side: BorderSide(color: context.colors.border),
-                    ),
-                    onSelected: (value) {
-                      if (value == 'edit') {
-                        editPlan(plan);
-                      } else if (value == 'delete') {
-                        deletePlan(plan);
-                      }
-                    },
-                    itemBuilder: (context) => [
-                      PopupMenuItem<String>(
-                        value: 'edit',
-                        child: Row(children: [
-                          Icon(Icons.edit_rounded,
-                              color: context.colors.yellow, size: 18),
-                          const SizedBox(width: 10),
-                          Text('Editar',
-                              style: TextStyle(color: context.colors.white)),
-                        ]),
-                      ),
-                      PopupMenuItem<String>(
-                        value: 'delete',
-                        child: Row(children: [
-                          Icon(Icons.delete_rounded,
-                              color: context.colors.red, size: 18),
-                          const SizedBox(width: 10),
-                          Text('Eliminar',
-                              style: TextStyle(color: context.colors.white)),
-                        ]),
-                      ),
-                    ],
-                  ),
-                ]),
-                const SizedBox(height: 20),
-                Text(name.toUpperCase(),
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.5,
-                    )),
-                const SizedBox(height: 16),
-                Text(formatPrice(price),
-                    style: TextStyle(
-                      color: planColor,
-                      fontSize: 42,
-                      fontWeight: FontWeight.w900,
-                      height: 1.0,
-                    )),
-                if (showConversion) ...[
-                  const SizedBox(height: 4),
-                  Text(formatPriceSecondary(price),
-                      style: TextStyle(
-                        color: context.colors.muted,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      )),
-                ],
-                const SizedBox(height: 20),
-                Container(
-                    height: 1,
-                    color: context.colors.white.withValues(alpha: .06)),
-                const SizedBox(height: 16),
-                _featureItem(
-                    '${plan['days']} días de vigencia', true, planColor),
-                const SizedBox(height: 10),
-                _featureItem(plan['access'].toString(), true, planColor),
-                const SizedBox(height: 10),
-                _featureItem('Acceso a todas las áreas', true, planColor),
-                const Spacer(),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () => sharePlan(plan, price),
-                    icon: const Icon(Icons.share_rounded, size: 18),
-                    label: const Text('COMPARTIR PLAN',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 12,
-                          letterSpacing: 0.5,
-                        )),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: planColor,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (badgeText != null)
-            Positioned(
-              top: 16,
-              right: 60,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Container(
+                width: 48,
+                height: 48,
                 decoration: BoxDecoration(
-                  color: planColor,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                        color: planColor.withValues(alpha: .4), blurRadius: 15),
-                  ],
+                  color: context.colors.red.withValues(alpha: .15),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                      color: context.colors.red.withValues(alpha: .35)),
                 ),
-                child: Text(badgeText,
-                    style: const TextStyle(
-                      color: Colors.black,
-                      fontSize: 9,
+                child: Icon(Icons.card_membership_rounded,
+                    color: context.colors.red, size: 26),
+              ),
+              const Spacer(),
+              PopupMenuButton<String>(
+                icon: Icon(Icons.more_vert_rounded,
+                    color: context.colors.muted, size: 20),
+                color: context.colors.panel2,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  side: BorderSide(color: context.colors.border),
+                ),
+                onSelected: (value) {
+                  if (value == 'edit') {
+                    editPlan(plan);
+                  } else if (value == 'delete') {
+                    deletePlan(plan);
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem<String>(
+                    value: 'edit',
+                    child: Row(children: [
+                      Icon(Icons.edit_rounded,
+                          color: context.colors.yellow, size: 18),
+                      const SizedBox(width: 10),
+                      Text('Editar',
+                          style: TextStyle(color: context.colors.white)),
+                    ]),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'delete',
+                    child: Row(children: [
+                      Icon(Icons.delete_rounded,
+                          color: context.colors.red, size: 18),
+                      const SizedBox(width: 10),
+                      Text('Eliminar',
+                          style: TextStyle(color: context.colors.white)),
+                    ]),
+                  ),
+                ],
+              ),
+            ]),
+            const SizedBox(height: 20),
+            Text(name.toUpperCase(),
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.5,
+                )),
+            const SizedBox(height: 16),
+            Text(formatPrice(price),
+                style: TextStyle(
+                  color: context.colors.red,
+                  fontSize: 42,
+                  fontWeight: FontWeight.w900,
+                  height: 1.0,
+                )),
+            if (showConversion) ...[
+              const SizedBox(height: 4),
+              Text(formatPriceSecondary(price),
+                  style: TextStyle(
+                    color: context.colors.muted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  )),
+            ],
+            const SizedBox(height: 20),
+            Container(
+                height: 1, color: context.colors.white.withValues(alpha: .06)),
+            const SizedBox(height: 16),
+            _featureItem(
+                '${plan['days']} días de vigencia', true, context.colors.red),
+            const SizedBox(height: 10),
+            _featureItem(plan['access'].toString(), true, context.colors.red),
+            const SizedBox(height: 10),
+            _featureItem('Acceso a todas las áreas', true, context.colors.red),
+            const Spacer(),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () => sharePlan(plan, price),
+                icon: const Icon(Icons.share_rounded, size: 18),
+                label: const Text('COMPARTIR PLAN',
+                    style: TextStyle(
                       fontWeight: FontWeight.w900,
-                      letterSpacing: 1,
+                      fontSize: 12,
+                      letterSpacing: 0.5,
                     )),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.colors.red,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                ),
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -10948,9 +9406,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     ]);
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // FINANZAS
-  // ═══════════════════════════════════════════════════════════
   Widget _financePage() {
     final isMobile = MediaQuery.of(context).size.width < 850;
     if (isMobile) return _financePageMobile();
@@ -10988,7 +9443,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   )),
               style: ElevatedButton.styleFrom(
                 backgroundColor: context.colors.green,
-                foregroundColor: Colors.black,
+                foregroundColor: Colors.white,
                 elevation: 0,
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16)),
@@ -10996,347 +9451,94 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ),
           ),
           const SizedBox(height: 22),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(children: [
-              _financePeriodChip('HOY', 'Hoy'),
-              const SizedBox(width: 8),
-              _financePeriodChip('SEMANA', 'Semana'),
-              const SizedBox(width: 8),
-              _financePeriodChip('MES', 'Mes'),
-              const SizedBox(width: 8),
-              _financePeriodChip('AÑO', 'Año'),
-              const SizedBox(width: 8),
-              _financePeriodChip('TODO', 'Todo'),
-            ]),
-          ),
-          const SizedBox(height: 20),
           _financeBigCard(
             title: 'INGRESOS',
             value: formatPrice(totalIncome),
-            trend: '+14.2%',
-            trendColor: context.colors.green,
             color: context.colors.green,
-            chartData: const [0.4, 0.5, 0.45, 0.6, 0.55, 0.7, 0.85, 1.0],
           ),
           const SizedBox(height: 12),
-          Row(children: [
-            Expanded(
-              child: _financeBigCard(
-                title: 'EGRESOS',
-                value: formatPrice(totalExpense),
-                trend: '-3.1%',
-                trendColor: context.colors.red,
-                color: context.colors.red,
-                chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _financeBigCard(
-                title: 'BALANCE',
-                value: formatPrice(balance),
-                trend: '+11.8%',
-                trendColor: context.colors.purple,
-                color: context.colors.purple,
-                chartData: const [0.3, 0.4, 0.5, 0.55, 0.65, 0.7, 0.85, 1.0],
-              ),
-            ),
-          ]),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: context.colors.cardBg,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                  color: context.colors.white.withValues(alpha: .05)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('MÉTODOS DE PAGO',
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.2,
-                    )),
-                const SizedBox(height: 18),
-                SizedBox(height: 180, child: _donutChart()),
-                const SizedBox(height: 18),
-                ...paymentMethods.entries.map((e) {
-                  final color = _methodColor(e.key);
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Row(children: [
-                      Container(
-                        width: 12,
-                        height: 12,
-                        decoration: BoxDecoration(
-                          color: color,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(e.key,
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.5,
-                            )),
-                      ),
-                      Text(formatPrice(e.value),
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w900,
-                          )),
-                    ]),
-                  );
-                }),
-              ],
-            ),
+          _financeBigCard(
+            title: 'EGRESOS',
+            value: formatPrice(totalExpense),
+            color: context.colors.red,
+          ),
+          const SizedBox(height: 12),
+          _financeBigCard(
+            title: 'BALANCE',
+            value: formatPrice(balance),
+            color: context.colors.blue,
           ),
           const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: context.colors.cardBg,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                  color: context.colors.white.withValues(alpha: .05)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('TRANSACCIONES RECIENTES',
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.2,
-                    )),
-                const SizedBox(height: 14),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(children: [
-                    _financeTxChip('TODOS', 'Todos'),
-                    const SizedBox(width: 8),
-                    _financeTxChip('INGRESOS', 'Ingresos'),
-                    const SizedBox(width: 8),
-                    _financeTxChip('EGRESOS', 'Egresos'),
-                  ]),
-                ),
-                const SizedBox(height: 16),
-                if (filteredTransactions.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 30),
-                    child: Center(
-                      child: Column(children: [
-                        Icon(Icons.receipt_long_outlined,
-                            color: context.colors.muted, size: 40),
-                        const SizedBox(height: 12),
-                        Text('Sin transacciones',
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                            )),
-                        const SizedBox(height: 4),
-                        Text('Registra un pago para verlas aquí',
-                            style: TextStyle(
-                                color: context.colors.muted, fontSize: 11),
-                            textAlign: TextAlign.center),
-                      ]),
-                    ),
-                  )
-                else
-                  ...filteredTransactions.take(10).map((t) {
-                    final isIncome = t['type'] == 'INGRESO';
-                    final amount = (t['amount'] as num).toDouble();
-                    final color =
-                        isIncome ? context.colors.green : context.colors.red;
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: Row(children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: color.withValues(alpha: .12),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            isIncome
-                                ? Icons.arrow_downward_rounded
-                                : Icons.arrow_upward_rounded,
-                            color: color,
-                            size: 20,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(t['name'].toString(),
-                                  style: TextStyle(
-                                    color: context.colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis),
-                              const SizedBox(height: 2),
-                              Text('${t['concept']} · ${t['method']}',
-                                  style: TextStyle(
-                                    color: context.colors.muted,
-                                    fontSize: 11,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis),
-                            ],
-                          ),
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(formatPrice(amount.abs()),
-                                style: TextStyle(
-                                  color: color,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w900,
-                                )),
-                            const SizedBox(height: 2),
-                            Text(t['date'].toString(),
-                                style: TextStyle(
-                                  color: context.colors.muted,
-                                  fontSize: 10,
-                                )),
-                          ],
-                        ),
-                      ]),
-                    );
-                  }),
-              ],
-            ),
+          _card(
+            title: 'MÉTODOS DE PAGO',
+            child: SizedBox(height: 180, child: _donutChart()),
           ),
           const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: context.colors.cardBg,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                  color: context.colors.white.withValues(alpha: .05)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('RANKING DE PLANES',
-                    style: TextStyle(
-                      color: context.colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.2,
-                    )),
-                const SizedBox(height: 16),
-                if (topPlans.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 30),
+          _card(
+            title: 'TRANSACCIONES',
+            child: filteredTransactions.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(30),
                     child: Center(
-                      child: Column(children: [
-                        Icon(Icons.card_membership_rounded,
-                            color: context.colors.muted, size: 40),
-                        const SizedBox(height: 12),
-                        Text('Sin datos de ventas',
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                            )),
-                        const SizedBox(height: 4),
-                        Text('Los planes más vendidos aparecerán aquí',
-                            style: TextStyle(
-                                color: context.colors.muted, fontSize: 11),
-                            textAlign: TextAlign.center),
-                      ]),
+                      child: Text('Sin transacciones',
+                          style: TextStyle(color: context.colors.muted)),
                     ),
                   )
-                else
-                  ...topPlans.map((p) {
-                    final maxSales = topPlans
-                        .map((e) => e['sales'] as int)
-                        .reduce((a, b) => a > b ? a : b);
-                    final percent =
-                        maxSales == 0 ? 0.0 : (p['sales'] as int) / maxSales;
-                    final color =
-                        _planColorByIndex((p['colorIndex'] as int?) ?? 0);
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(children: [
-                            Container(
-                              width: 32,
-                              height: 32,
-                              decoration: BoxDecoration(
-                                color: color.withValues(alpha: .15),
-                                borderRadius: BorderRadius.circular(9),
-                              ),
-                              child: Icon(Icons.card_membership_rounded,
-                                  color: color, size: 18),
+                : Column(
+                    children: filteredTransactions.take(10).map((t) {
+                      final isIncome = t['type'] == 'INGRESO';
+                      final amount = (t['amount'] as num).toDouble();
+                      final color =
+                          isIncome ? context.colors.green : context.colors.red;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Row(children: [
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: .12),
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(p['name'].toString().toUpperCase(),
-                                      style: TextStyle(
-                                        color: context.colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w900,
-                                        letterSpacing: 0.5,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis),
-                                  const SizedBox(height: 2),
-                                  Text('${p['sales']} ventas',
-                                      style: TextStyle(
-                                        color: context.colors.muted,
-                                        fontSize: 11,
-                                      )),
-                                ],
-                              ),
-                            ),
-                            Text(formatPrice((p['revenue'] as num).toDouble()),
-                                style: TextStyle(
-                                  color: color,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w900,
-                                )),
-                          ]),
-                          const SizedBox(height: 8),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(20),
-                            child: LinearProgressIndicator(
-                              value: percent,
-                              minHeight: 6,
-                              backgroundColor: context.colors.panel2,
-                              valueColor: AlwaysStoppedAnimation<Color>(color),
+                            child: Icon(
+                              isIncome
+                                  ? Icons.arrow_downward_rounded
+                                  : Icons.arrow_upward_rounded,
+                              color: color,
+                              size: 20,
                             ),
                           ),
-                        ],
-                      ),
-                    );
-                  }),
-              ],
-            ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(t['name'].toString(),
+                                    style: TextStyle(
+                                      color: context.colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                                Text(t['date'].toString(),
+                                    style: TextStyle(
+                                      color: context.colors.muted,
+                                      fontSize: 10,
+                                    )),
+                              ],
+                            ),
+                          ),
+                          Text(formatPrice(amount.abs()),
+                              style: TextStyle(
+                                color: color,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                              )),
+                        ]),
+                      );
+                    }).toList(),
+                  ),
           ),
         ],
       ),
@@ -11378,7 +9580,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   )),
               style: ElevatedButton.styleFrom(
                 backgroundColor: context.colors.green,
-                foregroundColor: Colors.black,
+                foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                 shape: RoundedRectangleBorder(
@@ -11418,7 +9620,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   subtitle: 'vs mes anterior',
                   chartData: const [0.9, 0.8, 0.85, 0.7, 0.65, 0.6, 0.55, 0.5]),
               _metric('BALANCE', formatPrice(balance),
-                  Icons.account_balance_wallet_rounded, context.colors.purple,
+                  Icons.account_balance_wallet_rounded, context.colors.blue,
                   trend: '+11.8%',
                   subtitle: 'ganancia neta',
                   chartData: const [0.3, 0.4, 0.5, 0.55, 0.65, 0.7, 0.85, 1.0]),
@@ -11451,7 +9653,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     0.88
                   ]),
               _metric('LTV', formatPrice(ltv), Icons.diamond_rounded,
-                  context.colors.purple,
+                  context.colors.blue,
                   trend: '+8.4%',
                   subtitle: 'valor por cliente',
                   chartData: const [0.4, 0.5, 0.6, 0.65, 0.7, 0.8, 0.9, 1.0]),
@@ -11460,8 +9662,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           const SizedBox(height: 24),
           _card(
             title: 'INGRESOS ÚLTIMOS 12 MESES',
-            action: 'VER DETALLE',
-            onAction: () {},
             child: SizedBox(height: 280, child: _lineChart()),
           ),
           const SizedBox(height: 20),
@@ -11534,244 +9734,77 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           ),
           const SizedBox(height: 20),
           _card(
-            title: 'RANKING DE PLANES MÁS VENDIDOS',
-            action: 'VER TODOS',
-            onAction: () {},
-            child: topPlans.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Center(
-                      child: Text('Aún no hay datos de ventas',
-                          style: TextStyle(color: context.colors.muted)),
-                    ),
-                  )
-                : Column(
-                    children: topPlans.map((p) {
-                      final maxSales = topPlans
-                          .map((e) => e['sales'] as int)
-                          .reduce((a, b) => a > b ? a : b);
-                      final percent =
-                          maxSales == 0 ? 0.0 : (p['sales'] as int) / maxSales;
-                      final color =
-                          _planColorByIndex((p['colorIndex'] as int?) ?? 0);
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(children: [
-                              Container(
-                                width: 32,
-                                height: 32,
-                                decoration: BoxDecoration(
-                                  color: color.withValues(alpha: .15),
-                                  borderRadius: BorderRadius.circular(9),
-                                ),
-                                child: Icon(Icons.card_membership_rounded,
-                                    color: color, size: 18),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(p['name'].toString().toUpperCase(),
-                                        style: TextStyle(
-                                          color: context.colors.white,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w900,
-                                          letterSpacing: 0.5,
-                                        )),
-                                    const SizedBox(height: 2),
-                                    Text('${p['sales']} ventas',
-                                        style: TextStyle(
-                                          color: context.colors.muted,
-                                          fontSize: 11,
-                                        )),
-                                  ],
-                                ),
-                              ),
-                              Text(
-                                  formatPrice((p['revenue'] as num).toDouble()),
-                                  style: TextStyle(
-                                    color: color,
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w900,
-                                  )),
-                            ]),
-                            const SizedBox(height: 8),
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(20),
-                              child: LinearProgressIndicator(
-                                value: percent,
-                                minHeight: 8,
-                                backgroundColor: context.colors.panel2,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(color),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  ),
-          ),
-          const SizedBox(height: 20),
-          _card(
             title: 'TRANSACCIONES RECIENTES',
-            action: 'VER TODO',
-            onAction: () {},
-            child: Column(
-              children: [
-                Row(children: [
-                  _transactionChip('TODOS'),
-                  const SizedBox(width: 8),
-                  _transactionChip('INGRESOS'),
-                  const SizedBox(width: 8),
-                  _transactionChip('EGRESOS'),
-                ]),
-                const SizedBox(height: 16),
-                if (filteredTransactions.isEmpty)
-                  Padding(
+            child: filteredTransactions.isEmpty
+                ? Padding(
                     padding: const EdgeInsets.all(24),
                     child: Center(
                       child: Text('Aún no hay transacciones',
                           style: TextStyle(color: context.colors.muted)),
                     ),
                   )
-                else
-                  ...filteredTransactions.map((t) {
-                    final isIncome = t['type'] == 'INGRESO';
-                    final amount = (t['amount'] as num).toDouble();
-                    final color =
-                        isIncome ? context.colors.green : context.colors.red;
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 10),
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: context.colors.panel2,
-                        borderRadius: BorderRadius.circular(13),
-                        border: Border.all(color: context.colors.border),
-                      ),
-                      child: Row(children: [
-                        Container(
-                          width: 42,
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color: color.withValues(alpha: .12),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            isIncome
-                                ? Icons.arrow_downward_rounded
-                                : Icons.arrow_upward_rounded,
-                            color: color,
-                            size: 22,
-                          ),
+                : Column(
+                    children: filteredTransactions.take(10).map((t) {
+                      final isIncome = t['type'] == 'INGRESO';
+                      final amount = (t['amount'] as num).toDouble();
+                      final color =
+                          isIncome ? context.colors.green : context.colors.red;
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: context.colors.panel2,
+                          borderRadius: BorderRadius.circular(13),
+                          border: Border.all(color: context.colors.border),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(t['name'].toString(),
-                                  style: TextStyle(
-                                    color: context.colors.white,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w800,
-                                  )),
-                              const SizedBox(height: 2),
-                              Text('${t['concept']} · ${t['method']}',
-                                  style: TextStyle(
-                                    color: context.colors.muted,
-                                    fontSize: 11,
-                                  )),
-                            ],
+                        child: Row(children: [
+                          Container(
+                            width: 42,
+                            height: 42,
+                            decoration: BoxDecoration(
+                              color: color.withValues(alpha: .12),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              isIncome
+                                  ? Icons.arrow_downward_rounded
+                                  : Icons.arrow_upward_rounded,
+                              color: color,
+                              size: 22,
+                            ),
                           ),
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(formatPrice(amount.abs()),
-                                style: TextStyle(
-                                  color: color,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w900,
-                                )),
-                            const SizedBox(height: 2),
-                            Text(t['date'].toString(),
-                                style: TextStyle(
-                                  color: context.colors.muted,
-                                  fontSize: 10,
-                                )),
-                          ],
-                        ),
-                      ]),
-                    );
-                  }),
-              ],
-            ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(t['name'].toString(),
+                                    style: TextStyle(
+                                      color: context.colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                    )),
+                                const SizedBox(height: 2),
+                                Text('${t['concept']} · ${t['method']}',
+                                    style: TextStyle(
+                                      color: context.colors.muted,
+                                      fontSize: 11,
+                                    )),
+                              ],
+                            ),
+                          ),
+                          Text(formatPrice(amount.abs()),
+                              style: TextStyle(
+                                color: color,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w900,
+                              )),
+                        ]),
+                      );
+                    }).toList(),
+                  ),
           ),
-          const SizedBox(height: 40),
         ],
-      ),
-    );
-  }
-
-  Widget _financePeriodChip(String value, String label) {
-    final selected = financePeriod == value;
-    return GestureDetector(
-      onTap: () => setState(() => financePeriod = value),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected
-              ? context.colors.green.withValues(alpha: .15)
-              : context.colors.panel,
-          borderRadius: BorderRadius.circular(30),
-          border: Border.all(
-            color: selected
-                ? context.colors.green.withValues(alpha: .55)
-                : context.colors.border,
-            width: 1.2,
-          ),
-        ),
-        child: Text(label,
-            style: TextStyle(
-              color: selected ? context.colors.green : context.colors.muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-            )),
-      ),
-    );
-  }
-
-  Widget _financeTxChip(String value, String label) {
-    final selected = transactionFilter == value;
-    return GestureDetector(
-      onTap: () => setState(() => transactionFilter = value),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-        decoration: BoxDecoration(
-          color: selected
-              ? context.colors.purple.withValues(alpha: .15)
-              : context.colors.panel,
-          borderRadius: BorderRadius.circular(30),
-          border: Border.all(
-            color: selected
-                ? context.colors.purple.withValues(alpha: .55)
-                : context.colors.border,
-            width: 1.2,
-          ),
-        ),
-        child: Text(label,
-            style: TextStyle(
-              color: selected ? context.colors.purple : context.colors.muted,
-              fontSize: 11,
-              fontWeight: FontWeight.w800,
-            )),
       ),
     );
   }
@@ -11779,45 +9812,25 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Widget _financeBigCard({
     required String title,
     required String value,
-    required String trend,
-    required Color trendColor,
     required Color color,
-    required List<double> chartData,
   }) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: context.colors.cardBg,
+        color: context.colors.panel,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: context.colors.white.withValues(alpha: .05)),
+        border: Border.all(color: context.colors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Expanded(
-              child: Text(title,
-                  style: TextStyle(
-                    color: context.colors.muted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1.2,
-                  )),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              decoration: BoxDecoration(
-                color: trendColor.withValues(alpha: .15),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(trend,
-                  style: TextStyle(
-                    color: trendColor,
-                    fontSize: 9,
-                    fontWeight: FontWeight.w900,
-                  )),
-            ),
-          ]),
+          Text(title,
+              style: TextStyle(
+                color: context.colors.muted,
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.2,
+              )),
           const SizedBox(height: 10),
           Text(value,
               style: TextStyle(
@@ -11825,18 +9838,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 fontSize: 22,
                 fontWeight: FontWeight.w900,
                 height: 1,
-                letterSpacing: -0.3,
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 40,
-            width: double.infinity,
-            child: CustomPaint(
-              painter: _MiniChartPainter(data: chartData, color: color),
-            ),
-          ),
         ],
       ),
     );
@@ -11845,26 +9849,11 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   Color _methodColor(String method) {
     switch (method) {
       case 'TARJETA':
-        return context.colors.purple;
+        return context.colors.blue;
       case 'EFECTIVO':
         return context.colors.green;
       case 'TRANSFERENCIA':
         return context.colors.yellow;
-      default:
-        return context.colors.red;
-    }
-  }
-
-  Color _planColorByIndex(int index) {
-    switch (index) {
-      case 0:
-        return context.colors.red;
-      case 1:
-        return context.colors.purple;
-      case 2:
-        return context.colors.yellow;
-      case 3:
-        return context.colors.green;
       default:
         return context.colors.red;
     }
@@ -11897,43 +9886,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     color:
                         selected ? context.colors.green : context.colors.muted,
                     fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.5,
-                  )),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _transactionChip(String label) {
-    final selected = transactionFilter == label;
-    return Expanded(
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(11),
-          onTap: () => setState(() => transactionFilter = label),
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            decoration: BoxDecoration(
-              color: selected
-                  ? context.colors.purple.withValues(alpha: .15)
-                  : context.colors.panel2,
-              borderRadius: BorderRadius.circular(11),
-              border: Border.all(
-                color: selected
-                    ? context.colors.purple.withValues(alpha: .45)
-                    : context.colors.border,
-              ),
-            ),
-            child: Center(
-              child: Text(label,
-                  style: TextStyle(
-                    color:
-                        selected ? context.colors.purple : context.colors.muted,
-                    fontSize: 10,
                     fontWeight: FontWeight.w900,
                     letterSpacing: 0.5,
                   )),
@@ -12005,8 +9957,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           spots: List.generate(monthlyIncome.length,
               (i) => FlSpot(i.toDouble(), monthlyIncome[i])),
           isCurved: true,
-          gradient: LinearGradient(
-              colors: [context.colors.green, context.colors.purple]),
+          color: context.colors.green,
           barWidth: 3,
           dotData: FlDotData(
             show: true,
@@ -12014,19 +9965,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               radius: 4,
               color: context.colors.green,
               strokeWidth: 2,
-              strokeColor: Colors.black,
+              strokeColor: context.colors.bg,
             ),
           ),
           belowBarData: BarAreaData(
             show: true,
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                context.colors.green.withValues(alpha: .25),
-                context.colors.green.withValues(alpha: .0),
-              ],
-            ),
+            color: context.colors.green.withValues(alpha: .15),
           ),
         ),
       ],
@@ -12126,7 +10070,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           radius: 30,
           title: '${percent.toStringAsFixed(0)}%',
           titleStyle: const TextStyle(
-            color: Colors.black,
+            color: Colors.white,
             fontSize: 11,
             fontWeight: FontWeight.w900,
           ),
@@ -12135,9 +10079,701 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     ));
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // CONFIGURACIÓN
-  // ═══════════════════════════════════════════════════════════
+  Widget _trainingPage() {
+    final tabs = ['RUTINAS', 'EJERCICIOS', 'ENTRENADORES', 'TIPOS', 'HORARIO'];
+    return Column(
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
+          decoration: BoxDecoration(
+            color: context.colors.bg,
+            border: Border(bottom: BorderSide(color: context.colors.border)),
+          ),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: List.generate(tabs.length, (i) {
+                final active = trainingTab == i;
+                return Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(11),
+                      onTap: () => setState(() => trainingTab = i),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 18, vertical: 12),
+                        decoration: BoxDecoration(
+                          color: active
+                              ? context.colors.red.withValues(alpha: .15)
+                              : context.colors.panel,
+                          borderRadius: BorderRadius.circular(11),
+                          border: Border.all(
+                            color: active
+                                ? context.colors.red.withValues(alpha: .45)
+                                : context.colors.border,
+                          ),
+                        ),
+                        child: Text(tabs[i],
+                            style: TextStyle(
+                              color: active
+                                  ? context.colors.red
+                                  : context.colors.muted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1,
+                            )),
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(28),
+            child: _trainingContent(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _trainingContent() {
+    switch (trainingTab) {
+      case 0:
+        return _routinesTab();
+      case 1:
+        return _exercisesTab();
+      case 2:
+        return _trainersTab();
+      case 3:
+        return _classTypesTab();
+      case 4:
+        return _scheduleTab();
+      default:
+        return _routinesTab();
+    }
+  }
+
+  Widget _routinesTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: Text('RUTINAS DISPONIBLES',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                )),
+          ),
+          ElevatedButton.icon(
+            onPressed: addRoutine,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('NUEVA RUTINA',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13)),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 20),
+        if (routines.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(40),
+            child: Center(
+              child: Text('Sin rutinas creadas',
+                  style: TextStyle(color: context.colors.muted)),
+            ),
+          )
+        else
+          ...routines.map((r) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: context.colors.red.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(Icons.fitness_center_rounded,
+                          color: context.colors.red, size: 22),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(r['name'].toString(),
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              )),
+                          const SizedBox(height: 3),
+                          Text(
+                              '${r['level']} · ${r['duration']} min · ${r['exercises']} ej',
+                              style: TextStyle(
+                                  color: context.colors.muted, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => showAssignRoutineDialog(r),
+                      icon: Icon(Icons.person_add_rounded,
+                          color: context.colors.green, size: 20),
+                    ),
+                    IconButton(
+                      onPressed: () => editRoutine(r),
+                      icon: Icon(Icons.edit_rounded,
+                          color: context.colors.yellow, size: 18),
+                    ),
+                    IconButton(
+                      onPressed: () => deleteRoutine(r),
+                      icon: Icon(Icons.delete_rounded,
+                          color: context.colors.red, size: 18),
+                    ),
+                  ]),
+                ),
+              )),
+      ],
+    );
+  }
+
+  Widget _exercisesTab() {
+    final muscles = [
+      'TODOS',
+      'Pecho',
+      'Espalda',
+      'Piernas',
+      'Hombros',
+      'Brazos',
+      'Core'
+    ];
+    final filtered = exerciseFilter == 'TODOS'
+        ? exercises
+        : exercises.where((e) => e['muscle'] == exerciseFilter).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: Text('BIBLIOTECA DE EJERCICIOS',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                )),
+          ),
+          ElevatedButton.icon(
+            onPressed: addExercise,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('NUEVO EJERCICIO',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13)),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 16),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: muscles.map((m) {
+              final active = exerciseFilter == m;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(11),
+                    onTap: () => setState(() => exerciseFilter = m),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: active
+                            ? context.colors.red.withValues(alpha: .15)
+                            : context.colors.panel,
+                        borderRadius: BorderRadius.circular(11),
+                        border: Border.all(
+                          color: active
+                              ? context.colors.red.withValues(alpha: .45)
+                              : context.colors.border,
+                        ),
+                      ),
+                      child: Text(m.toUpperCase(),
+                          style: TextStyle(
+                            color: active
+                                ? context.colors.red
+                                : context.colors.muted,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1,
+                          )),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        const SizedBox(height: 20),
+        if (filtered.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(40),
+            child: Center(
+              child: Text('Sin ejercicios',
+                  style: TextStyle(color: context.colors.muted)),
+            ),
+          )
+        else
+          ...filtered.map((e) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: context.colors.red.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(11),
+                      ),
+                      child: Icon(Icons.fitness_center_rounded,
+                          color: context.colors.red, size: 20),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(e['name'].toString(),
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                              )),
+                          Text('${e['muscle']} · ${e['level']}',
+                              style: TextStyle(
+                                  color: context.colors.muted, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                    Text('${e['sets']}x${e['reps']} · ${e['weight']}kg',
+                        style: TextStyle(
+                          color: context.colors.green,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                        )),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      onPressed: () => editExercise(e),
+                      icon: Icon(Icons.edit_rounded,
+                          color: context.colors.yellow, size: 18),
+                    ),
+                    IconButton(
+                      onPressed: () => deleteExercise(e),
+                      icon: Icon(Icons.delete_rounded,
+                          color: context.colors.red, size: 18),
+                    ),
+                  ]),
+                ),
+              )),
+      ],
+    );
+  }
+
+  Widget _trainersTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: Text('ENTRENADORES',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                )),
+          ),
+          ElevatedButton.icon(
+            onPressed: addTrainer,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('NUEVO ENTRENADOR',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13)),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 20),
+        if (trainers.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(40),
+            child: Center(
+              child: Text('Sin entrenadores',
+                  style: TextStyle(color: context.colors.muted)),
+            ),
+          )
+        else
+          ...trainers.map((t) => Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: context.colors.red,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(t['name'].toString()[0].toUpperCase(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                          )),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(t['name'].toString(),
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              )),
+                          Text('${t['specialty']} · ${t['schedule']}',
+                              style: TextStyle(
+                                  color: context.colors.muted, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                    Row(children: [
+                      Icon(Icons.star_rounded,
+                          color: context.colors.yellow, size: 16),
+                      const SizedBox(width: 4),
+                      Text(t['rating'].toString(),
+                          style: TextStyle(
+                            color: context.colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          )),
+                    ]),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      onPressed: () => editTrainer(t),
+                      icon: Icon(Icons.edit_rounded,
+                          color: context.colors.yellow, size: 18),
+                    ),
+                    IconButton(
+                      onPressed: () => deleteTrainer(t),
+                      icon: Icon(Icons.delete_rounded,
+                          color: context.colors.red, size: 18),
+                    ),
+                  ]),
+                ),
+              )),
+      ],
+    );
+  }
+
+  Widget _classTypesTab() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: Text('TIPOS DE CLASE',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                )),
+          ),
+          ElevatedButton.icon(
+            onPressed: addClassType,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('NUEVO TIPO',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13)),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 20),
+        ...classTypes.map((ct) => Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Row(children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: context.colors.red.withValues(alpha: .15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(_iconFromCodePoint(ct['icon'] as int),
+                        color: context.colors.red, size: 22),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(ct['name'].toString().toUpperCase(),
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                        )),
+                  ),
+                  IconButton(
+                    onPressed: () => editClassType(ct),
+                    icon: Icon(Icons.edit_rounded,
+                        color: context.colors.yellow, size: 18),
+                  ),
+                  IconButton(
+                    onPressed: () => deleteClassType(ct),
+                    icon: Icon(Icons.delete_rounded,
+                        color: context.colors.red, size: 18),
+                  ),
+                ]),
+              ),
+            )),
+      ],
+    );
+  }
+
+  Widget _scheduleTab() {
+    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Expanded(
+            child: Text('CALENDARIO SEMANAL',
+                style: TextStyle(
+                  color: context.colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1,
+                )),
+          ),
+          ElevatedButton.icon(
+            onPressed: addClass,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: const Text('NUEVA CLASE',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.colors.red,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13)),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 20),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: days.map((day) {
+              final dayClasses = classes.where((c) => c['day'] == day).toList()
+                ..sort((a, b) =>
+                    a['time'].toString().compareTo(b['time'].toString()));
+              return Container(
+                width: 260,
+                margin: const EdgeInsets.only(right: 14),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: context.colors.panel,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.calendar_today_rounded,
+                            color: context.colors.red, size: 16),
+                        const SizedBox(width: 8),
+                        Text(day,
+                            style: TextStyle(
+                              color: context.colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 1,
+                            )),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    if (dayClasses.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 20),
+                        child: Text('Sin clases',
+                            style: TextStyle(
+                                color: context.colors.muted, fontSize: 11)),
+                      )
+                    else
+                      ...dayClasses.map((c) => _classSlot(c)),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _classSlot(Map<String, dynamic> classItem) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: context.colors.panel2,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.colors.red.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: context.colors.red.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(classItem['time'].toString(),
+                    style: TextStyle(
+                      color: context.colors.red,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                    )),
+              ),
+              const Spacer(),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => editClass(classItem),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(Icons.edit_rounded,
+                        color: context.colors.yellow, size: 16),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => deleteClass(classItem),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(Icons.close_rounded,
+                        color: context.colors.red, size: 16),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(classItem['name'].toString(),
+              style: TextStyle(
+                color: context.colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 4),
+          Text(classItem['trainer'].toString(),
+              style: TextStyle(color: context.colors.muted, fontSize: 10),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: (classItem['capacity'] as int) == 0
+                        ? 0
+                        : (classItem['enrolled'] as int) /
+                            (classItem['capacity'] as int),
+                    minHeight: 4,
+                    backgroundColor: context.colors.border,
+                    valueColor: AlwaysStoppedAnimation(context.colors.red),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text('${classItem['enrolled']}/${classItem['capacity']}',
+                  style: TextStyle(color: context.colors.muted, fontSize: 10)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _currencyPage() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -12156,6 +10792,65 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               'Personaliza WhatsApp, PIN, monedas y preferencias del gimnasio.',
               style: TextStyle(color: context.colors.muted, fontSize: 13)),
           const SizedBox(height: 26),
+          _card(
+            title: 'TEMA',
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(13),
+                onTap: () => themeController.toggle(),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel2,
+                    borderRadius: BorderRadius.circular(13),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(children: [
+                    Icon(
+                      themeController.isDark
+                          ? Icons.light_mode_rounded
+                          : Icons.dark_mode_rounded,
+                      color: context.colors.red,
+                      size: 24,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                              themeController.isDark
+                                  ? 'Modo OSCURO activo'
+                                  : 'Modo CLARO activo',
+                              style: TextStyle(
+                                color: context.colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 13,
+                              )),
+                          const SizedBox(height: 3),
+                          Text(
+                              'Toca para cambiar al modo ${themeController.isDark ? "claro" : "oscuro"}',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 11,
+                              )),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      themeController.isDark
+                          ? Icons.light_mode_rounded
+                          : Icons.dark_mode_rounded,
+                      color: context.colors.red,
+                      size: 20,
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
           _card(
             title: 'WHATSAPP DEL GIMNASIO',
             child: Column(
@@ -12192,8 +10887,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           fontSize: 12,
                         )),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: context.colors.green,
-                      foregroundColor: Colors.black,
+                      backgroundColor: context.colors.red,
+                      foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12)),
@@ -12234,12 +10929,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
                           color: isSelected
-                              ? context.colors.green.withValues(alpha: .13)
+                              ? context.colors.red.withValues(alpha: .13)
                               : context.colors.panel2,
                           borderRadius: BorderRadius.circular(13),
                           border: Border.all(
                             color: isSelected
-                                ? context.colors.green.withValues(alpha: .45)
+                                ? context.colors.red.withValues(alpha: .45)
                                 : context.colors.border,
                           ),
                         ),
@@ -12248,14 +10943,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                             width: 44,
                             height: 44,
                             decoration: BoxDecoration(
-                              color:
-                                  context.colors.green.withValues(alpha: .12),
+                              color: context.colors.red.withValues(alpha: .12),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Center(
                               child: Text(c['symbol']!,
                                   style: TextStyle(
-                                    color: context.colors.green,
+                                    color: context.colors.red,
                                     fontWeight: FontWeight.w900,
                                     fontSize: 17,
                                   )),
@@ -12283,7 +10977,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                           ),
                           if (isSelected)
                             Icon(Icons.check_circle_rounded,
-                                color: context.colors.green, size: 24),
+                                color: context.colors.red, size: 24),
                         ]),
                       ),
                     ),
@@ -12397,27 +11091,23 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ),
           ),
           const SizedBox(height: 20),
-          _button('LISTO', context.colors.green, () async {
+          _button('LISTO', context.colors.red, () async {
             await _saveLocalData();
             if (!mounted) return;
             setState(() => _section = 0);
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('✅ Configuración guardada')),
             );
-          }, darkText: true),
+          }),
           const SizedBox(height: 40),
         ],
       ),
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // ALERTAS (DESKTOP)
-  // ═══════════════════════════════════════════════════════════
   Widget _alertsPage() {
     final filtered = filteredAlerts(context);
     final renewals = renewalRequests.where((r) => r['read'] != true).toList();
-
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
       child: Column(
@@ -12537,90 +11227,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _alertsPageMobile() {
-    final filtered = filteredAlerts(context);
-    final renewals = renewalRequests.where((r) => r['read'] != true).toList();
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 110),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Alertas',
-              style: TextStyle(
-                color: context.colors.white,
-                fontSize: 28,
-                fontWeight: FontWeight.w900,
-                letterSpacing: -0.5,
-              )),
-          const SizedBox(height: 4),
-          Text(
-              (alertCount(context) + renewals.length) == 0
-                  ? 'Todo al día'
-                  : '${alertCount(context) + renewals.length} pendientes',
-              style: TextStyle(color: context.colors.muted, fontSize: 13)),
-          const SizedBox(height: 18),
-          if (renewals.isNotEmpty) ...[
-            Text('SOLICITUDES DE RENOVACIÓN',
-                style: TextStyle(
-                  color: context.colors.yellow,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.5,
-                )),
-            const SizedBox(height: 12),
-            ...renewals.map((r) => _renewalCard(r)),
-            const SizedBox(height: 24),
-          ],
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(children: [
-              _alertFilterChipMobile('TODAS', 'Todas'),
-              const SizedBox(width: 8),
-              _alertFilterChipMobile('PENDIENTES', 'Pendientes'),
-              const SizedBox(width: 8),
-              _alertFilterChipMobile('VENCIDAS', 'Vencidas'),
-              const SizedBox(width: 8),
-              _alertFilterChipMobile('POR VENCER', 'Por vencer'),
-              const SizedBox(width: 8),
-              _alertFilterChipMobile('INFO', 'Info'),
-            ]),
-          ),
-          const SizedBox(height: 20),
-          if (filtered.isEmpty && renewals.isEmpty)
-            Container(
-              padding: const EdgeInsets.all(40),
-              decoration: BoxDecoration(
-                color: context.colors.panel,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: context.colors.border),
-              ),
-              child: Center(
-                child: Column(children: [
-                  Container(
-                    width: 70,
-                    height: 70,
-                    decoration: BoxDecoration(
-                      color: context.colors.green.withValues(alpha: .12),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Icon(Icons.check_circle_rounded,
-                        color: context.colors.green, size: 34),
-                  ),
-                  const SizedBox(height: 18),
-                  Text('Todo en orden',
-                      style: TextStyle(
-                        color: context.colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w900,
-                      )),
-                ]),
-              ),
-            )
-          else
-            ...filtered.map((alert) => _alertCard(alert)),
-        ],
-      ),
-    );
+    return _alertsPage();
   }
 
   Widget _renewalCard(Map<String, dynamic> r) {
@@ -12649,21 +11256,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: context.colors.yellow.withValues(alpha: .15),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text('RENOVACIÓN',
-                    style: TextStyle(
-                      color: context.colors.yellow,
-                      fontSize: 9,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 0.5,
-                    )),
-              ),
-              const SizedBox(height: 6),
               Text(r['name'].toString(),
                   style: TextStyle(
                     color: context.colors.white,
@@ -12786,7 +11378,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       )),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: context.colors.green,
-                    foregroundColor: Colors.black,
+                    foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12)),
@@ -12876,38 +11468,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  Widget _alertFilterChipMobile(String value, String label) {
-    final selected = alertFilter == value;
-    return GestureDetector(
-      onTap: () => setState(() => alertFilter = value),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected
-              ? context.colors.red.withValues(alpha: .15)
-              : context.colors.panel,
-          borderRadius: BorderRadius.circular(30),
-          border: Border.all(
-            color: selected
-                ? context.colors.red.withValues(alpha: .55)
-                : context.colors.border,
-            width: 1.2,
-          ),
-        ),
-        child: Text(label,
-            style: TextStyle(
-              color: selected ? context.colors.red : context.colors.muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-            )),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // AUXILIARES
-  // ═══════════════════════════════════════════════════════════
   Widget _quickAction(
     IconData icon,
     String text,
@@ -12921,7 +11481,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         onPressed: action,
         style: ElevatedButton.styleFrom(
           backgroundColor: color,
-          foregroundColor: darkText ? Colors.black : Colors.white,
+          foregroundColor: Colors.white,
           elevation: 0,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
@@ -13126,7 +11686,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         onPressed: action,
         style: ElevatedButton.styleFrom(
           backgroundColor: color,
-          foregroundColor: darkText ? Colors.black : Colors.white,
+          foregroundColor: Colors.white,
           elevation: 0,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
@@ -13171,7 +11731,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(13),
-        borderSide: BorderSide(color: ctx.colors.purple, width: 1.5),
+        borderSide: BorderSide(color: ctx.colors.red, width: 1.5),
       ),
     );
   }
@@ -13387,226 +11947,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     );
   }
 
-  // ═══════════════════════════════════════════════════════════
-  // MOBILE (ADMIN)
-  // ═══════════════════════════════════════════════════════════
-  Widget _mobile() {
-    return SafeArea(
-      child: Column(
-        children: [
-          _mobileHeader(),
-          Expanded(
-            child: loadingData
-                ? Center(
-                    child:
-                        CircularProgressIndicator(color: context.colors.green))
-                : _mobileContent(),
-          ),
-          _mobileNav(),
-        ],
-      ),
-    );
-  }
-
-  Widget _mobileHeader() {
-    final ac = alertCount(context) + renewalRequests.length;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-      decoration: BoxDecoration(
-        color: context.colors.bg,
-        border: Border(bottom: BorderSide(color: context.colors.border)),
-      ),
-      child: Row(
-        children: [
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () => _scaffoldKey.currentState?.openDrawer(),
-              child: Container(
-                width: 42,
-                height: 42,
-                decoration: BoxDecoration(
-                  color: context.colors.panel,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Icon(Icons.menu_rounded,
-                    color: context.colors.white, size: 22),
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: context.colors.red,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.bolt_rounded, color: Colors.black),
-          ),
-          const SizedBox(width: 11),
-          Expanded(
-            child: Text('SYNTHETIX GYM OS',
-                style: TextStyle(
-                  color: context.colors.white,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1,
-                  fontSize: 13,
-                )),
-          ),
-          IconButton(
-            onPressed: () => loadAllData(),
-            icon: Icon(Icons.refresh_rounded, color: context.colors.green),
-          ),
-          Stack(
-            children: [
-              IconButton(
-                onPressed: showNotifications,
-                icon: Icon(Icons.notifications_none_rounded,
-                    color: context.colors.white),
-              ),
-              if (ac > 0)
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    padding: const EdgeInsets.all(4),
-                    constraints:
-                        const BoxConstraints(minWidth: 16, minHeight: 16),
-                    decoration: BoxDecoration(
-                      color: context.colors.red,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Text('$ac',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w900,
-                        )),
-                  ),
-                ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _mobileContent() {
-    final isMobile = MediaQuery.of(context).size.width < 850;
-    if (_section == 1) return _clientsPage();
-    if (_section == 2) {
-      return isMobile ? _qrCenterMobile() : _qrCenter();
-    }
-    if (_section == 3) {
-      return isMobile ? _plansPageMobile() : _plansPage();
-    }
-    if (_section == 4) return _financePage();
-    if (_section == 5) return _trainingPage();
-    if (_section == 6) {
-      return isMobile ? _alertsPageMobile() : _alertsPage();
-    }
-    if (_section == 7) return _currencyPage();
-    return _dashboardContent();
-  }
-
-  Widget _mobileNav() {
-    final items = [
-      {'icon': Icons.home_rounded, 'label': 'Inicio', 'index': 0},
-      {'icon': Icons.people_alt_rounded, 'label': 'Clientes', 'index': 1},
-      {'icon': Icons.qr_code_scanner_rounded, 'label': 'Scan', 'index': -1},
-      {'icon': Icons.fitness_center_rounded, 'label': 'Entreno', 'index': 5},
-      {'icon': Icons.payments_rounded, 'label': 'Finanzas', 'index': 4},
-    ];
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 14),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      decoration: BoxDecoration(
-        color: context.colors.panel,
-        borderRadius: BorderRadius.circular(40),
-        border: Border.all(color: context.colors.white.withValues(alpha: .06)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: .55),
-            blurRadius: 25,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: items.map((item) {
-          final idx = item['index'] as int;
-          final isScan = idx == -1;
-          final selected = _section == idx;
-          if (isScan) {
-            return GestureDetector(
-              onTap: showAccessScanner,
-              child: Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [context.colors.orange, const Color(0xFFFF5500)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: context.colors.orange.withValues(alpha: .55),
-                      blurRadius: 20,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Icon(Icons.qr_code_scanner_rounded,
-                    color: Colors.white, size: 24),
-              ),
-            );
-          }
-          return Expanded(
-            child: GestureDetector(
-              onTap: () => setState(() => _section = idx),
-              behavior: HitTestBehavior.opaque,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      item['icon'] as IconData,
-                      color: selected
-                          ? context.colors.orange
-                          : context.colors.muted,
-                      size: 20,
-                    ),
-                    const SizedBox(height: 3),
-                    Text(item['label'] as String,
-                        style: TextStyle(
-                          color: selected
-                              ? context.colors.white
-                              : context.colors.muted,
-                          fontSize: 9,
-                          fontWeight:
-                              selected ? FontWeight.w800 : FontWeight.w500,
-                        )),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // SCANNER ADMIN
-  // ═══════════════════════════════════════════════════════════
   void showAccessScanner() {
     showModalBottomSheet(
       context: context,
@@ -13697,10 +12037,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         break;
       }
     }
-
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-
     if (found == null) {
       messenger.showSnackBar(
         const SnackBar(
@@ -13710,31 +12048,26 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       );
       return;
     }
-
     final status = found['status'].toString().toUpperCase();
     final memberName = found['name'].toString();
     final memberId = found['id'];
     final isBlocked = status != 'ACTIVO';
-
     String type = 'ENTRADA';
     try {
       final supabase = Supabase.instance.client;
       final now = DateTime.now();
       final startOfDay = DateTime(now.year, now.month, now.day);
       final startOfDayStr = startOfDay.toIso8601String();
-
       final todayCheckins = await supabase
           .from('checkins')
           .select()
           .eq('member_id', memberId)
           .gte('created_at', startOfDayStr)
           .order('created_at', ascending: true);
-
       final lastType = todayCheckins.isNotEmpty
           ? todayCheckins.last['type'].toString().toUpperCase()
           : '';
       type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
-
       await supabase.from('checkins').insert({
         'member_id': memberId,
         'type': type,
@@ -13742,12 +12075,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         'reason': isBlocked ? 'Membresía $status' : null,
         'registered_by': 'admin',
       });
-
       await supabase.from('activities').insert({
         'type': isBlocked ? 'BLOQUEADO' : type,
         'name': memberName,
       });
-
       if (type == 'ENTRADA' && !isBlocked) {
         final attendance = (found['attendance'] as num?)?.toInt() ?? 0;
         await supabase.from('members').update({
@@ -13769,13 +12100,10 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           });
         }
       }
-
       if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
-
       await loadActivities();
       await loadCheckins();
       await _saveLocalData();
-
       if (!mounted) return;
       await _showAccessOverlay(
         success: !isBlocked,
@@ -13809,25 +12137,57 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     addActivity('SALIDA', 'Acceso registrado');
     _saveLocalData();
     if (!mounted) return;
-    final ctx = context;
-    ScaffoldMessenger.of(ctx).showSnackBar(
+    ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Salida registrada correctamente')),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      generateGymQr();
+      await _loadLocalData();
+      if (mounted) setState(() => loadingData = false);
+      _syncWithSupabase();
+    });
+  }
+
+  @override
+  void dispose() {
+    _aforoTimer?.cancel();
+    searchController.dispose();
+    pinController.dispose();
+    clientCedulaController.dispose();
+    regNameController.dispose();
+    regCedulaController.dispose();
+    regPhoneController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMobile = MediaQuery.of(context).size.width < 850;
+    if (currentRole == UserRole.none) return _loginScreen();
+    if (currentRole == UserRole.client) return _clientHome();
+    return Scaffold(
+      key: _scaffoldKey,
+      backgroundColor: context.colors.bg,
+      drawer: isMobile ? _mobileDrawer() : null,
+      body: isMobile ? _mobile() : _desktop(),
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// PAINTERS
-// ═══════════════════════════════════════════════════════════
 class _OccupancyPainter extends CustomPainter {
   final double percentage;
   final Color trackColor;
-  final List<Color> progressColors;
+  final Color progressColor;
 
   _OccupancyPainter({
     required this.percentage,
     required this.trackColor,
-    required this.progressColors,
+    required this.progressColor,
   });
 
   @override
@@ -13839,15 +12199,12 @@ class _OccupancyPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 14
       ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, trackPaint);
     final progressPaint = Paint()
-      ..shader = SweepGradient(
-        colors: progressColors,
-        stops: const [0.0, 0.5, 1.0],
-      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ..color = progressColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = 14
       ..strokeCap = StrokeCap.round;
-    canvas.drawCircle(center, radius, trackPaint);
     final sweepAngle = 2 * math.pi * percentage.clamp(0.0, 1.0);
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
@@ -13916,9 +12273,6 @@ class _MiniChartPainter extends CustomPainter {
       oldDelegate.data != data || oldDelegate.color != color;
 }
 
-// ═══════════════════════════════════════════════════════════
-// WIDGETS AUXILIARES
-// ═══════════════════════════════════════════════════════════
 class _RateField extends StatefulWidget {
   final String label;
   final double initialValue;
@@ -13979,7 +12333,7 @@ class _RateFieldState extends State<_RateField> {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(13),
-          borderSide: BorderSide(color: context.colors.purple, width: 1.5),
+          borderSide: BorderSide(color: context.colors.red, width: 1.5),
         ),
       ),
     );
@@ -14042,7 +12396,7 @@ class _GymPhoneFieldState extends State<_GymPhoneField> {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(13),
-          borderSide: BorderSide(color: context.colors.purple, width: 1.5),
+          borderSide: BorderSide(color: context.colors.red, width: 1.5),
         ),
       ),
     );
@@ -14080,7 +12434,6 @@ class _ChangePinSectionState extends State<_ChangePinSection> {
     final current = _currentPinCtrl.text.trim();
     final newPin = _newPinCtrl.text.trim();
     final confirm = _confirmPinCtrl.text.trim();
-
     if (current != widget.adminPin) {
       ScaffoldMessenger.of(ctx).showSnackBar(
         SnackBar(
@@ -14117,13 +12470,10 @@ class _ChangePinSectionState extends State<_ChangePinSection> {
       );
       return;
     }
-
     await widget.onPinChanged(newPin);
-
     _currentPinCtrl.clear();
     _newPinCtrl.clear();
     _confirmPinCtrl.clear();
-
     if (mounted) {
       ScaffoldMessenger.of(ctx).showSnackBar(
         SnackBar(
@@ -14253,9 +12603,6 @@ class _ChangePinSectionState extends State<_ChangePinSection> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-// PERFIL DEL CLIENTE
-// ═══════════════════════════════════════════════════════════
 class _ClientProfilePage extends StatelessWidget {
   final Map<String, dynamic> member;
   final String Function(double) formatPrice;
@@ -14277,7 +12624,7 @@ class _ClientProfilePage extends StatelessWidget {
     final s = member['status'].toString();
     if (s == 'ACTIVO') return context.colors.green;
     if (s == 'POR VENCER') return context.colors.yellow;
-    if (s == 'PENDIENTE') return context.colors.purple;
+    if (s == 'PENDIENTE') return context.colors.red;
     return context.colors.red;
   }
 
@@ -14292,7 +12639,6 @@ class _ClientProfilePage extends StatelessWidget {
     final memberTx =
         transactions.where((t) => t['name'] == name).take(10).toList();
     final statusColor = _statusColor(context);
-
     return Scaffold(
       backgroundColor: context.colors.bg,
       body: SafeArea(
@@ -14333,27 +12679,16 @@ class _ClientProfilePage extends StatelessWidget {
                           width: 88,
                           height: 88,
                           decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                statusColor,
-                                statusColor.withValues(alpha: .5)
-                              ],
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                            ),
+                            color: statusColor.withValues(alpha: .15),
                             shape: BoxShape.circle,
-                            boxShadow: [
-                              BoxShadow(
-                                color: statusColor.withValues(alpha: .30),
-                                blurRadius: 24,
-                                offset: const Offset(0, 8),
-                              ),
-                            ],
+                            border: Border.all(
+                                color: statusColor.withValues(alpha: .40),
+                                width: 2),
                           ),
                           alignment: Alignment.center,
                           child: Text(initial,
-                              style: const TextStyle(
-                                color: Colors.black,
+                              style: TextStyle(
+                                color: statusColor,
                                 fontSize: 36,
                                 fontWeight: FontWeight.w900,
                               )),
@@ -14398,7 +12733,7 @@ class _ClientProfilePage extends StatelessWidget {
                       Expanded(
                         child: _miniStatTile(
                           icon: Icons.event_available_rounded,
-                          color: context.colors.purple,
+                          color: context.colors.red,
                           value: '$attendance',
                           label: 'Asistencia',
                         ),
@@ -14427,19 +12762,19 @@ class _ClientProfilePage extends StatelessWidget {
                       _profileCard(
                         title: 'RUTINA ASIGNADA',
                         icon: Icons.fitness_center_rounded,
-                        color: context.colors.purple,
+                        color: context.colors.red,
                         child: Container(
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: context.colors.purple.withValues(alpha: .10),
+                            color: context.colors.red.withValues(alpha: .10),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                                color: context.colors.purple
-                                    .withValues(alpha: .35)),
+                                color:
+                                    context.colors.red.withValues(alpha: .35)),
                           ),
                           child: Row(children: [
                             Icon(Icons.fitness_center_rounded,
-                                color: context.colors.purple, size: 20),
+                                color: context.colors.red, size: 20),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Text(routineName,
@@ -14457,7 +12792,7 @@ class _ClientProfilePage extends StatelessWidget {
                     _profileCard(
                       title: 'INFORMACIÓN',
                       icon: Icons.info_outline_rounded,
-                      color: context.colors.purple,
+                      color: context.colors.red,
                       child: Column(children: [
                         _infoRowDetail('Plan', member['plan'].toString()),
                         _infoRowDetail('Vence', member['expiry'].toString()),
@@ -14565,7 +12900,7 @@ class _ClientProfilePage extends StatelessWidget {
                         )),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: context.colors.green,
-                      foregroundColor: Colors.black,
+                      foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14)),
@@ -14672,7 +13007,6 @@ class _ClientProfilePage extends StatelessWidget {
               style: TextStyle(
                 color: context.colors.muted,
                 fontSize: 10,
-                fontWeight: FontWeight.w600,
               )),
         ]),
       );
@@ -14728,7 +13062,6 @@ class _ClientProfilePage extends StatelessWidget {
       return Padding(
         padding: EdgeInsets.only(bottom: isLast ? 0 : 12),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
               flex: 4,
@@ -14762,7 +13095,7 @@ class _ClientProfilePage extends StatelessWidget {
       Color methodColor = context.colors.green;
       IconData methodIcon = Icons.payments_rounded;
       if (method == 'TARJETA') {
-        methodColor = context.colors.purple;
+        methodColor = context.colors.blue;
         methodIcon = Icons.credit_card_rounded;
       } else if (method == 'TRANSFERENCIA') {
         methodColor = context.colors.yellow;
