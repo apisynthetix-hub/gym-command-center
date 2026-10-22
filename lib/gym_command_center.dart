@@ -1,5 +1,6 @@
 // lib/gym_command_center.dart
 import 'dart:io' show File;
+import 'dart:html' as html;
 import 'dart:math' as math;
 import 'dart:convert';
 import 'dart:async';
@@ -56,6 +57,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   bool clientLoadingAforo = false;
   int clientCapacity = 150;
   Timer? _aforoTimer;
+  Timer? _qrRefreshTimer;
   int clientStreak = 0;
   List<String> clientCheckinDates = [];
   List<Map<String, dynamic>> insidePeople = [];
@@ -652,15 +654,38 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     if (newSection == _section) return;
     _sectionHistory.add(_section);
     setState(() => _section = newSection);
+    if (newSection == 2) {
+      _startQrRefreshTimer();
+    } else {
+      _stopQrRefreshTimer();
+    }
   }
 
   void _goBackInApp() {
     if (_sectionHistory.isNotEmpty) {
       final prev = _sectionHistory.removeLast();
       setState(() => _section = prev);
+      if (prev == 2) {
+        _startQrRefreshTimer();
+      } else {
+        _stopQrRefreshTimer();
+      }
     } else if (_section != 0) {
       setState(() => _section = 0);
+      _stopQrRefreshTimer();
     }
+  }
+
+  void _startQrRefreshTimer() {
+    _qrRefreshTimer?.cancel();
+    _qrRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && _section == 2) setState(() {});
+    });
+  }
+
+  void _stopQrRefreshTimer() {
+    _qrRefreshTimer?.cancel();
+    _qrRefreshTimer = null;
   }
 
   String _sectionTitle() {
@@ -880,6 +905,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       await _saveLocalData();
       await loadClientAforo();
       await loadClientStreak();
+      await _syncQrFromCloud();
       startAforoAutoRefresh();
     } catch (e) {
       debugPrint('❌ Error login cliente: $e');
@@ -1009,6 +1035,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   void logout() {
     _aforoTimer?.cancel();
+    _stopQrRefreshTimer();
     _sectionHistory.clear();
     setState(() {
       currentRole = UserRole.none;
@@ -1154,27 +1181,33 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     try {
       if (mounted) setState(() => clientLoadingAforo = true);
       final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria: inicio del día LOCAL convertido a UTC
       final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+
       final response = await supabase
           .from('checkins')
-          .select()
-          .gte('created_at', startOfDayStr)
+          .select('member_id, type, authorized, created_at')
+          .gte('created_at', startOfDayUtc)
           .order('created_at', ascending: true);
-      int entradas = 0;
-      int salidas = 0;
+
+      // ✅ FIX aforo: contar PERSONAS dentro, no movimientos netos
+      final Map<String, bool> insideState = {};
       for (final row in response) {
+        final mid = row['member_id']?.toString();
+        if (mid == null) continue;
         final type = (row['type'] ?? '').toString().toUpperCase();
         final authorized = row['authorized'] ?? true;
         if (type == 'ENTRADA' && authorized == true) {
-          entradas++;
+          insideState[mid] = true;
         } else if (type == 'SALIDA') {
-          salidas++;
+          insideState.remove(mid);
         }
       }
-      final calculated = entradas - salidas;
-      final finalInside = calculated < 0 ? 0 : calculated;
+      final finalInside = insideState.length;
+
       if (!mounted) return;
       setState(() {
         clientInsideCount = finalInside;
@@ -1209,18 +1242,20 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       final supabase = Supabase.instance.client;
       final memberId = loggedClient!['id'];
       final sixtyDaysAgo = DateTime.now().subtract(const Duration(days: 60));
-      final sixtyDaysAgoStr = sixtyDaysAgo.toIso8601String();
+      final sixtyDaysAgoUtc = sixtyDaysAgo.toUtc().toIso8601String();
+
       final response = await supabase
           .from('checkins')
-          .select()
+          .select('created_at')
           .eq('member_id', memberId)
           .eq('type', 'ENTRADA')
-          .gte('created_at', sixtyDaysAgoStr)
+          .gte('created_at', sixtyDaysAgoUtc)
           .order('created_at', ascending: false);
+
       final Set<String> uniqueDays = {};
       for (final row in response) {
-        final d =
-            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+        final d = DateTime.tryParse(row['created_at'].toString())?.toLocal() ??
+            DateTime.now();
         final key =
             '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
         uniqueDays.add(key);
@@ -1251,6 +1286,816 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
+  Future<void> _saveLocalData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('members', jsonEncode(members));
+      await prefs.setString('plans', jsonEncode(plans));
+      await prefs.setString('transactions', jsonEncode(transactions));
+      await prefs.setString('activities', jsonEncode(activities));
+      await prefs.setString('routines', jsonEncode(routines));
+      await prefs.setString('exercises', jsonEncode(exercises));
+      await prefs.setString('trainers', jsonEncode(trainers));
+      await prefs.setString('classes', jsonEncode(classes));
+      await prefs.setString('classTypes', jsonEncode(classTypes));
+      await prefs.setString('renewalRequests', jsonEncode(renewalRequests));
+      await prefs.setInt('inside', inside);
+      await prefs.setStringList('dismissedAlerts', dismissedAlerts.toList());
+      await prefs.setString('dismissedDate', dismissedDate);
+      await prefs.setString('adminPin', adminPin);
+      await prefs.setString('gymPhone', gymPhone);
+      await prefs.setString('selectedCurrency', selectedCurrency);
+      await prefs.setBool('showConversion', showConversion);
+      await prefs.setDouble('usdToVes', usdToVes);
+      await prefs.setDouble('eurToVes', eurToVes);
+      await prefs.setDouble('copToVes', copToVes);
+      await prefs.setString('qrMode', qrMode);
+      await prefs.setInt('capacity', capacity);
+      // ✅ FIX QR persistente: guardar QR actual para no regenerarlo en cada apertura
+      await prefs.setString('qrToken', qrToken);
+      await prefs.setString('qrGenerated', qrGenerated.toIso8601String());
+      await prefs.setString('qrExpires', qrExpires.toIso8601String());
+    } catch (e) {
+      debugPrint('❌ Error guardando local: $e');
+    }
+  }
+
+  Future<void> _loadLocalData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedAdminPin = prefs.getString('adminPin');
+      adminPin =
+          (savedAdminPin != null && RegExp(r'^\d{4}$').hasMatch(savedAdminPin))
+              ? savedAdminPin
+              : '1234';
+      if (savedAdminPin != adminPin) {
+        await prefs.setString('adminPin', adminPin);
+      }
+      final savedGymPhone = prefs.getString('gymPhone');
+      if (savedGymPhone != null && savedGymPhone.isNotEmpty) {
+        gymPhone = savedGymPhone;
+      }
+      final savedCurrency = prefs.getString('selectedCurrency');
+      if (savedCurrency != null) selectedCurrency = savedCurrency;
+      final savedConversion = prefs.getBool('showConversion');
+      if (savedConversion != null) showConversion = savedConversion;
+      final savedUsd = prefs.getDouble('usdToVes');
+      if (savedUsd != null && savedUsd > 0) usdToVes = savedUsd;
+      final savedEur = prefs.getDouble('eurToVes');
+      if (savedEur != null && savedEur > 0) eurToVes = savedEur;
+      final savedCop = prefs.getDouble('copToVes');
+      if (savedCop != null && savedCop > 0) copToVes = savedCop;
+      final savedQrMode = prefs.getString('qrMode');
+      if (savedQrMode != null) qrMode = savedQrMode;
+      final savedCapacity = prefs.getInt('capacity');
+      if (savedCapacity != null && savedCapacity > 0) capacity = savedCapacity;
+
+      // ✅ FIX QR persistente: cargar QR guardado si no ha expirado
+      final savedQrToken = prefs.getString('qrToken');
+      final savedQrExpires = prefs.getString('qrExpires');
+      final savedQrGenerated = prefs.getString('qrGenerated');
+      if (savedQrToken != null && savedQrToken.isNotEmpty) {
+        final exp = DateTime.tryParse(savedQrExpires ?? '');
+        if (exp != null && exp.isAfter(DateTime.now())) {
+          qrToken = savedQrToken;
+          qrExpires = exp;
+          qrGenerated =
+              DateTime.tryParse(savedQrGenerated ?? '') ?? DateTime.now();
+        }
+      }
+
+      final todayKey = _formatDateForCode(DateTime.now());
+      final savedDismissedDate = prefs.getString('dismissedDate') ?? '';
+      if (savedDismissedDate != todayKey) {
+        await prefs.setStringList('dismissedAlerts', []);
+        await prefs.setString('dismissedDate', todayKey);
+        dismissedAlerts = {};
+        dismissedDate = todayKey;
+      } else {
+        final saved = prefs.getStringList('dismissedAlerts') ?? [];
+        dismissedAlerts = saved.toSet();
+        dismissedDate = savedDismissedDate;
+      }
+      final membersStr = prefs.getString('members');
+      final plansStr = prefs.getString('plans');
+      final transactionsStr = prefs.getString('transactions');
+      final activitiesStr = prefs.getString('activities');
+      final routinesStr = prefs.getString('routines');
+      final exercisesStr = prefs.getString('exercises');
+      final trainersStr = prefs.getString('trainers');
+      final classesStr = prefs.getString('classes');
+      final classTypesStr = prefs.getString('classTypes');
+      final renewalStr = prefs.getString('renewalRequests');
+      final savedInside = prefs.getInt('inside');
+      if (membersStr != null) {
+        final loaded = (jsonDecode(membersStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          members.clear();
+          members.addAll(loaded);
+          activeMembers = members.length;
+        }
+      }
+      if (plansStr != null) {
+        final loaded = (jsonDecode(plansStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          plans.clear();
+          plans.addAll(loaded);
+        }
+      }
+      if (transactionsStr != null) {
+        final loaded = (jsonDecode(transactionsStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) transactions = loaded;
+      }
+      if (activitiesStr != null) {
+        final loaded = (jsonDecode(activitiesStr) as List)
+            .map((e) => Map<String, String>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          activities.clear();
+          activities.addAll(loaded);
+        }
+      }
+      if (routinesStr != null) {
+        final loaded = (jsonDecode(routinesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          routines.clear();
+          routines.addAll(loaded);
+        }
+      }
+      if (exercisesStr != null) {
+        final loaded = (jsonDecode(exercisesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          exercises.clear();
+          exercises.addAll(loaded);
+        }
+      }
+      if (trainersStr != null) {
+        final loaded = (jsonDecode(trainersStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          trainers.clear();
+          trainers.addAll(loaded);
+        }
+      }
+      if (classesStr != null) {
+        final loaded = (jsonDecode(classesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          classes.clear();
+          classes.addAll(loaded);
+        }
+      }
+      if (classTypesStr != null) {
+        final loaded = (jsonDecode(classTypesStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          classTypes.clear();
+          classTypes.addAll(loaded);
+        }
+      }
+      if (renewalStr != null) {
+        final loaded = (jsonDecode(renewalStr) as List)
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
+        if (loaded.isNotEmpty) {
+          renewalRequests = loaded;
+        }
+      }
+      if (savedInside != null) inside = savedInside;
+
+      // ✅ FIX: sincronizar el controlador de capacidad con el valor cargado
+      if (mounted) {
+        _capacityController.text = capacity.toString();
+      }
+    } catch (e) {
+      debugPrint('❌ Error cargando local: $e');
+    }
+  }
+
+  Future<void> loadMembers() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('members')
+          .select()
+          .order('created_at', ascending: false);
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, dynamic>>[];
+        for (final row in response) {
+          loaded.add({
+            'id': row['id'],
+            'name': row['name'] ?? '',
+            'cedula': row['cedula'] ?? '',
+            'phone': row['phone'] ?? '',
+            'plan': row['plan'] ?? '',
+            'expiry': row['expiry'] ?? '',
+            'status': row['status'] ?? 'ACTIVO',
+            'memberSince': row['member_since'] ?? '',
+            'payments': row['payments'] ?? 0,
+            'totalPaid': (row['total_paid'] as num?)?.toDouble() ?? 0.0,
+            'attendance': row['attendance'] ?? 0,
+            'lastVisit': row['last_visit'] ?? '',
+            'qrCode': row['qr_code'] ?? '',
+            'assignedRoutine': row['assigned_routine'] ?? '',
+            'assignedRoutineId': row['assigned_routine_id'] ?? '',
+          });
+        }
+        if (!mounted) return;
+        setState(() {
+          members.clear();
+          members.addAll(loaded);
+          activeMembers = members.length;
+        });
+        await _saveLocalData();
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading members: $e');
+    }
+  }
+
+  Future<void> loadPayments() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('payments')
+          .select(
+              'id, member_id, amount, method, status, created_at, members(name, plan)')
+          .order('created_at', ascending: false);
+      final loaded = <Map<String, dynamic>>[];
+      for (final row in response) {
+        final memberData = row['members'];
+        final createdAt =
+            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+        loaded.add({
+          'name': memberData != null
+              ? (memberData['name'] ?? 'Sin nombre')
+              : 'Sin miembro',
+          'concept':
+              memberData != null ? 'Plan ${memberData['plan'] ?? "—"}' : 'Pago',
+          'amount': (row['amount'] as num?)?.toDouble() ?? 0.0,
+          'method': (row['method'] ?? 'EFECTIVO').toString().toUpperCase(),
+          'date': _formatDate(createdAt),
+          'type': 'INGRESO',
+          'created_at': createdAt,
+        });
+      }
+      final calcMonthly = List<double>.filled(12, 0);
+      final currentYear = DateTime.now().year;
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        if (d.year == currentYear) {
+          calcMonthly[d.month - 1] += (t['amount'] as num).toDouble();
+        }
+      }
+      final calcMethods = <String, double>{
+        'TARJETA': 0,
+        'EFECTIVO': 0,
+        'TRANSFERENCIA': 0,
+      };
+      final twelveMonthsAgo =
+          DateTime.now().subtract(const Duration(days: 365));
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        if (d.isAfter(twelveMonthsAgo)) {
+          final m = t['method'].toString();
+          calcMethods[m] =
+              (calcMethods[m] ?? 0) + (t['amount'] as num).toDouble();
+        }
+      }
+      final calcWeekly = List<double>.filled(4, 0);
+      for (final t in loaded) {
+        final d = t['created_at'] as DateTime;
+        final diffDays = DateTime.now().difference(d).inDays;
+        if (diffDays < 28 && diffDays >= 0) {
+          final weekIndex = 3 - (diffDays ~/ 7);
+          if (weekIndex >= 0 && weekIndex < 4) {
+            calcWeekly[weekIndex] += (t['amount'] as num).toDouble();
+          }
+        }
+      }
+      final planSales = <String, Map<String, dynamic>>{};
+      for (final t in loaded) {
+        final concept = t['concept'].toString();
+        if (!planSales.containsKey(concept)) {
+          planSales[concept] = {'sales': 0, 'revenue': 0.0};
+        }
+        planSales[concept]!['sales'] =
+            (planSales[concept]!['sales'] as int) + 1;
+        planSales[concept]!['revenue'] =
+            (planSales[concept]!['revenue'] as double) +
+                (t['amount'] as num).toDouble();
+      }
+      final sortedPlans = planSales.entries.toList()
+        ..sort((a, b) => (b.value['revenue'] as double)
+            .compareTo(a.value['revenue'] as double));
+      final loadedTopPlans = <Map<String, dynamic>>[];
+      for (int i = 0; i < sortedPlans.length && i < 4; i++) {
+        final e = sortedPlans[i];
+        loadedTopPlans.add({
+          'name': e.key.replaceFirst('Plan ', ''),
+          'sales': e.value['sales'],
+          'revenue': e.value['revenue'],
+          'colorIndex': i,
+        });
+      }
+      double totalIngresos = 0;
+      for (final t in loaded) {
+        totalIngresos += (t['amount'] as num).toDouble();
+      }
+      if (!mounted) return;
+      if (loaded.isNotEmpty) {
+        setState(() {
+          transactions = loaded;
+          monthlyIncome = calcMonthly;
+          paymentMethods = calcMethods;
+          weeklyIncome = calcWeekly;
+          weeklyExpense = [0, 0, 0, 0];
+          topPlans = loadedTopPlans;
+          income = totalIngresos;
+        });
+        await _saveLocalData();
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading payments: $e');
+    }
+  }
+
+  Future<void> loadPlans() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('plans')
+          .select()
+          .order('created_at', ascending: true);
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, dynamic>>[];
+        for (final row in response) {
+          loaded.add({
+            'id': row['id'],
+            'name': row['name'] ?? '',
+            'price': (row['price'] as num?)?.toDouble() ?? 0.0,
+            'days': (row['days'] as num?)?.toInt() ?? 30,
+            'access': row['access'] ?? 'ILIMITADO',
+          });
+        }
+        if (!mounted) return;
+        setState(() {
+          plans.clear();
+          plans.addAll(loaded);
+        });
+        await _saveLocalData();
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading plans: $e');
+    }
+  }
+
+  Future<void> loadActivities() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('activities')
+          .select()
+          .order('created_at', ascending: false)
+          .limit(50);
+      if (response.isNotEmpty) {
+        final loaded = <Map<String, String>>[];
+        for (final row in response) {
+          final createdAt =
+              DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
+          loaded.add({
+            'type': row['type'] ?? '',
+            'name': row['name'] ?? '',
+            'time':
+                '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}',
+          });
+        }
+        if (!mounted) return;
+        setState(() {
+          activities.clear();
+          activities.addAll(loaded);
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error loading activities: $e');
+    }
+  }
+
+  Future<void> loadCheckins() async {
+    try {
+      if (mounted) setState(() => loadingCheckins = true);
+      final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria: inicio del día LOCAL convertido a UTC
+      final now = DateTime.now();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+
+      final response = await supabase
+          .from('checkins')
+          .select('member_id, type, authorized, created_at')
+          .gte('created_at', startOfDayUtc)
+          .order('created_at', ascending: true);
+
+      // ✅ FIX aforo: contar PERSONAS dentro, no movimientos netos
+      final Map<String, bool> insideState = {};
+      for (final row in response) {
+        final mid = row['member_id']?.toString();
+        if (mid == null) continue;
+        final type = (row['type'] ?? '').toString().toUpperCase();
+        final authorized = row['authorized'] ?? true;
+        if (type == 'ENTRADA' && authorized == true) {
+          insideState[mid] = true;
+        } else if (type == 'SALIDA') {
+          insideState.remove(mid);
+        }
+      }
+      final finalInside = insideState.length;
+
+      if (!mounted) return;
+      setState(() {
+        inside = finalInside;
+        loadingCheckins = false;
+      });
+      await loadInsidePeople();
+    } catch (e) {
+      debugPrint('❌ Error cargando checkins: $e');
+      if (mounted) setState(() => loadingCheckins = false);
+    }
+  }
+
+  Future<void> loadInsidePeople() async {
+    try {
+      final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria
+      final now = DateTime.now();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+
+      final checkins = await supabase
+          .from('checkins')
+          .select(
+              'member_id, type, authorized, created_at, members(name, plan, phone)')
+          .gte('created_at', startOfDayUtc)
+          .order('created_at', ascending: true);
+
+      final Map<String, Map<String, dynamic>> state = {};
+      for (final row in checkins) {
+        final mid = row['member_id']?.toString();
+        if (mid == null) continue;
+        final type = (row['type'] ?? '').toString().toUpperCase();
+        final authorized = row['authorized'] ?? true;
+        final memberData = row['members'];
+        final name = memberData != null
+            ? (memberData['name'] ?? 'Sin nombre')
+            : 'Sin nombre';
+        final plan = memberData != null ? (memberData['plan'] ?? '—') : '—';
+        final phone = memberData != null ? (memberData['phone'] ?? '') : '';
+        final createdAt =
+            DateTime.tryParse(row['created_at'].toString())?.toLocal() ?? now;
+
+        if (type == 'ENTRADA' && authorized == true) {
+          state[mid] = {
+            'id': mid,
+            'name': name,
+            'plan': plan,
+            'phone': phone,
+            'entryTime': createdAt,
+          };
+        } else if (type == 'SALIDA') {
+          state.remove(mid);
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        insidePeople = state.values.toList()
+          ..sort((a, b) => (b['entryTime'] as DateTime)
+              .compareTo(a['entryTime'] as DateTime));
+      });
+    } catch (e) {
+      debugPrint('❌ Error cargando aforo detallado: $e');
+    }
+  }
+
+  Future<void> loadAllData() async {
+    await _loadLocalData();
+    if (mounted) setState(() => loadingData = false);
+    _syncWithSupabase();
+  }
+
+  Future<void> _syncWithSupabase() async {
+    try {
+      Supabase.instance.client;
+    } catch (_) {
+      try {
+        await Supabase.initialize(
+          url: SupabaseConfig.supabaseUrl,
+          anonKey: SupabaseConfig.supabaseAnonKey,
+        );
+        await Future.delayed(const Duration(milliseconds: 500));
+      } catch (e) {
+        debugPrint('⚠️ Sin conexión a Supabase. Modo offline.');
+        return;
+      }
+    }
+    bool ready = false;
+    for (int i = 0; i < 30; i++) {
+      try {
+        Supabase.instance.client;
+        ready = true;
+        break;
+      } catch (_) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+    }
+    if (!ready) return;
+    try {
+      await loadPlans();
+    } catch (_) {}
+    try {
+      await loadMembers();
+    } catch (_) {}
+    try {
+      await loadPayments();
+    } catch (_) {}
+    try {
+      await loadActivities();
+    } catch (_) {}
+    try {
+      await loadCheckins();
+    } catch (_) {}
+
+    // ✅ FIX: leer capacity desde Supabase (gym_settings)
+    try {
+      final settings = await Supabase.instance.client
+          .from('gym_settings')
+          .select()
+          .eq('key', 'capacity')
+          .maybeSingle();
+      if (settings != null) {
+        final v = int.tryParse(settings['value']?.toString() ?? '');
+        if (v != null && v > 0 && mounted) {
+          setState(() {
+            capacity = v;
+            _capacityController.text = v.toString();
+          });
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setInt('capacity', v);
+          debugPrint('✅ Capacity cargada de Supabase: $v');
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ No se pudo leer capacity de Supabase: $e');
+    }
+
+    // ✅ FIX: leer QR actual de Supabase (para validar en cliente)
+    try {
+      await _syncQrFromCloud();
+    } catch (e) {
+      debugPrint('⚠️ No se pudo leer QR de Supabase: $e');
+    }
+
+    await _saveLocalData();
+  }
+
+  String _formatDate(DateTime d) {
+    final now = DateTime.now();
+    final diff = now.difference(d);
+    if (diff.inHours < 24 && now.day == d.day) {
+      return 'Hoy ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    }
+    if (diff.inDays < 2) {
+      return 'Ayer ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+    }
+    return '${d.day}/${d.month}/${d.year}';
+  }
+
+  String _calculateExpiryDate(String planName, DateTime from) {
+    int days = 30;
+    for (final p in plans) {
+      if (p['name'].toString().toLowerCase() == planName.toLowerCase()) {
+        days = (p['days'] as num?)?.toInt() ?? 30;
+        break;
+      }
+    }
+    final expiry = from.add(Duration(days: days));
+    return '${expiry.day.toString().padLeft(2, '0')} ${_monthName(expiry.month)} ${expiry.year}';
+  }
+
+  String _formatMemberSince(DateTime d) {
+    return '${d.day.toString().padLeft(2, '0')} ${_monthName(d.month)} ${d.year}';
+  }
+
+  String _monthName(int month) {
+    const months = [
+      'ENE',
+      'FEB',
+      'MAR',
+      'ABR',
+      'MAY',
+      'JUN',
+      'JUL',
+      'AGO',
+      'SEP',
+      'OCT',
+      'NOV',
+      'DIC',
+    ];
+    if (month < 1 || month > 12) return 'ENE';
+    return months[month - 1];
+  }
+
+  String _generateToken() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final random = math.Random();
+    String result = '';
+    for (int i = 0; i < 6; i++) {
+      result += chars[random.nextInt(chars.length)];
+    }
+    return result;
+  }
+
+  String _formatDateForCode(DateTime d) {
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  }
+
+  String formatPrice(double priceInUsd) {
+    final priceInBs = priceInUsd * usdToVes;
+    double converted;
+    String symbol;
+    switch (selectedCurrency) {
+      case 'USD':
+        converted = priceInUsd;
+        symbol = '\$';
+        break;
+      case 'EUR':
+        converted = priceInBs / eurToVes;
+        symbol = '€';
+        break;
+      case 'VES':
+        converted = priceInBs;
+        symbol = 'Bs. ';
+        break;
+      case 'COP':
+        converted = priceInBs / copToVes;
+        symbol = '\$';
+        break;
+      default:
+        converted = priceInUsd;
+        symbol = '\$';
+    }
+    if (selectedCurrency == 'VES' || selectedCurrency == 'COP') {
+      return '$symbol${converted.toStringAsFixed(0)}';
+    }
+    return '$symbol${converted.toStringAsFixed(2)}';
+  }
+
+  String formatPriceSecondary(double priceInUsd) {
+    if (!showConversion) return '';
+    if (selectedCurrency == 'VES') {
+      return '≈ \$${priceInUsd.toStringAsFixed(2)}';
+    } else {
+      final ves = priceInUsd * usdToVes;
+      return 'Bs. ${ves.toStringAsFixed(0)}';
+    }
+  }
+
+  Future<void> addActivity(String type, String name) async {
+    if (!mounted) return;
+    final now = DateTime.now();
+    final time =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    setState(() {
+      activities.insert(0, {
+        'type': type,
+        'name': name,
+        'time': time,
+      });
+      if (activities.length > 50) activities.removeLast();
+    });
+    try {
+      final supabase = Supabase.instance.client;
+      await supabase.from('activities').insert({
+        'type': type,
+        'name': name,
+      });
+    } catch (e) {
+      debugPrint('⚠️ Actividad solo local: $e');
+    }
+    await _saveLocalData();
+  }
+
+  IconData _iconFromCodePoint(int codePoint) {
+    switch (codePoint) {
+      case 0xe4a4:
+        return Icons.self_improvement;
+      case 0xe4a7:
+        return Icons.directions_bike;
+      case 0xe4a8:
+        return Icons.fitness_center;
+      case 0xe4a9:
+        return Icons.sports_mma;
+      case 0xe4aa:
+        return Icons.accessibility_new;
+      case 0xe4ab:
+        return Icons.sports_gymnastics;
+      case 0xe4ac:
+        return Icons.sports_martial_arts;
+      case 0xe4ad:
+        return Icons.sports_handball;
+      default:
+        return Icons.fitness_center;
+    }
+  }
+
+  // ✅ FIX: al generar el QR se programa la regeneración automática
+  // y se sincroniza a Supabase para que el cliente lo lea
+  void generateGymQr() {
+    final now = DateTime.now();
+    final token = _generateToken();
+    String code;
+    DateTime exp;
+    switch (qrMode) {
+      case 'DIARIO':
+        code = 'SYNTH-GYM-${_formatDateForCode(now)}-$token';
+        exp = DateTime(now.year, now.month, now.day, 23, 59, 59);
+        break;
+      case 'SEMANAL':
+        code = 'SYNTH-GYM-WEEK-${_formatDateForCode(now)}-$token';
+        exp = now.add(const Duration(days: 7));
+        break;
+      case 'FIJO':
+      default:
+        code = 'SYNTH-GYM-FIXED-$token';
+        exp = now.add(const Duration(days: 3650));
+        break;
+    }
+    setState(() {
+      qrToken = code;
+      qrGenerated = now;
+      qrExpires = exp;
+    });
+    _saveLocalData();
+    _scheduleDailyQrRefresh();
+    _syncQrToCloud();
+  }
+
+  // ✅ FIX: regenera el QR DIARIO automáticamente a medianoche
+  Future<void> _scheduleDailyQrRefresh() async {
+    if (qrMode != 'DIARIO') return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('qrMode', qrMode);
+    if (!mounted) return;
+
+    final now = DateTime.now();
+    final nextMidnight = DateTime(now.year, now.month, now.day + 1, 0, 0, 1);
+    final diff = nextMidnight.difference(now);
+
+    Future.delayed(diff, () {
+      if (!mounted) return;
+      if (qrMode == 'DIARIO') {
+        generateGymQr();
+      }
+    });
+  }
+
+  // ✅ FIX: subir QR actual a Supabase (gym_settings) para que el cliente lo lea
+  Future<void> _syncQrToCloud() async {
+    try {
+      await Supabase.instance.client.from('gym_settings').upsert([
+        {'key': 'qr_token', 'value': qrToken},
+        {'key': 'qr_expires', 'value': qrExpires.toUtc().toIso8601String()},
+        {'key': 'qr_mode', 'value': qrMode},
+      ], onConflict: 'key');
+      debugPrint('✅ QR sincronizado a Supabase');
+    } catch (e) {
+      debugPrint('⚠️ No se pudo sincronizar QR a Supabase: $e');
+    }
+  }
+
+  String get qrTimeLeft {
+    final now = DateTime.now();
+    final diff = qrExpires.difference(now);
+    if (diff.isNegative) return 'EXPIRADO';
+    if (diff.inDays > 0) return 'Expira en ${diff.inDays} dia(s)';
+    if (diff.inHours > 0) return 'Expira en ${diff.inHours} hora(s)';
+    return 'Expira en ${diff.inMinutes} minuto(s)';
+  }
+
   Future<void> _processGymQrScan(String scannedCode) async {
     if (_qrProcessing) return;
     if (loggedClient == null) return;
@@ -1259,36 +2104,67 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final memberId = client['id'];
     final memberName = client['name'].toString();
     final status = client['status'].toString().toUpperCase();
-    final isValid = scannedCode.startsWith('SYNTH-GYM-');
-    if (!isValid) {
-      _qrProcessing = false;
-      if (!mounted) return;
-      await _showAccessOverlay(
-        success: false,
-        title: 'QR INVÁLIDO',
-        subtitle: 'Este código no pertenece al gimnasio.',
-        name: memberName,
-        status: 'INVÁLIDO',
-      );
-      return;
-    }
-    String type = 'ENTRADA';
+
     try {
+      // 1. Validar prefijo
+      if (!scannedCode.startsWith('SYNTH-GYM-')) {
+        await _showAccessOverlay(
+          success: false,
+          title: 'QR INVÁLIDO',
+          subtitle: 'Este código no pertenece al gimnasio.',
+          name: memberName,
+          status: 'INVÁLIDO',
+        );
+        return;
+      }
+
+      // 2. Validar expiración (solo si no es FIJO)
+      if (qrMode != 'FIJO' && DateTime.now().isAfter(qrExpires)) {
+        await _showAccessOverlay(
+          success: false,
+          title: 'QR EXPIRADO',
+          subtitle: 'El código del gimnasio ha vencido. Pide uno nuevo.',
+          name: memberName,
+          status: 'EXPIRADO',
+        );
+        return;
+      }
+
+      // 3. Validar que el token escaneado sea el actual
+      if (qrToken.isNotEmpty && scannedCode != qrToken) {
+        await _showAccessOverlay(
+          success: false,
+          title: 'QR NO VIGENTE',
+          subtitle: 'Este código ya no es válido. Escanea el QR actual.',
+          name: memberName,
+          status: 'OBSOLETO',
+        );
+        return;
+      }
+
+      // 4. Registrar entrada/salida
+      String type = 'ENTRADA';
       final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria
       final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+
       final todayCheckins = await supabase
           .from('checkins')
-          .select()
+          .select('type')
           .eq('member_id', memberId)
-          .gte('created_at', startOfDayStr)
+          .gte('created_at', startOfDayUtc)
           .order('created_at', ascending: true);
+
       final lastType = todayCheckins.isNotEmpty
           ? todayCheckins.last['type'].toString().toUpperCase()
           : '';
       type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
+
       final isBlocked = status != 'ACTIVO';
+
       await supabase.from('checkins').insert({
         'member_id': memberId,
         'type': type,
@@ -1296,10 +2172,12 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'reason': isBlocked ? 'Membresía $status' : null,
         'registered_by': 'client_qr',
       });
+
       await supabase.from('activities').insert({
         'type': isBlocked ? 'BLOQUEADO' : type,
         'name': memberName,
       });
+
       if (type == 'ENTRADA' && !isBlocked) {
         final attendance = (client['attendance'] as num?)?.toInt() ?? 0;
         await supabase.from('members').update({
@@ -1319,14 +2197,17 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         if (mounted) {
           setState(() {
             if (clientInsideCount > 0) clientInsideCount--;
+            if (inside > 0) inside--;
           });
         }
       }
+
       if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
       await loadActivities();
       await loadCheckins();
       await loadClientAforo();
       await _saveLocalData();
+
       if (!mounted) return;
       await _showAccessOverlay(
         success: !isBlocked,
@@ -1605,712 +2486,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     );
   }
 
-  Future<void> _saveLocalData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('members', jsonEncode(members));
-      await prefs.setString('plans', jsonEncode(plans));
-      await prefs.setString('transactions', jsonEncode(transactions));
-      await prefs.setString('activities', jsonEncode(activities));
-      await prefs.setString('routines', jsonEncode(routines));
-      await prefs.setString('exercises', jsonEncode(exercises));
-      await prefs.setString('trainers', jsonEncode(trainers));
-      await prefs.setString('classes', jsonEncode(classes));
-      await prefs.setString('classTypes', jsonEncode(classTypes));
-      await prefs.setString('renewalRequests', jsonEncode(renewalRequests));
-      await prefs.setInt('inside', inside);
-      await prefs.setStringList('dismissedAlerts', dismissedAlerts.toList());
-      await prefs.setString('dismissedDate', dismissedDate);
-      await prefs.setString('adminPin', adminPin);
-      await prefs.setString('gymPhone', gymPhone);
-      await prefs.setString('selectedCurrency', selectedCurrency);
-      await prefs.setBool('showConversion', showConversion);
-      await prefs.setDouble('usdToVes', usdToVes);
-      await prefs.setDouble('eurToVes', eurToVes);
-      await prefs.setDouble('copToVes', copToVes);
-      await prefs.setString('qrMode', qrMode);
-      await prefs.setInt('capacity', capacity);
-    } catch (e) {
-      debugPrint('❌ Error guardando local: $e');
-    }
-  }
-
-  Future<void> _loadLocalData() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final savedAdminPin = prefs.getString('adminPin');
-      adminPin =
-          (savedAdminPin != null && RegExp(r'^\d{4}$').hasMatch(savedAdminPin))
-              ? savedAdminPin
-              : '1234';
-      if (savedAdminPin != adminPin) {
-        await prefs.setString('adminPin', adminPin);
-      }
-      final savedGymPhone = prefs.getString('gymPhone');
-      if (savedGymPhone != null && savedGymPhone.isNotEmpty) {
-        gymPhone = savedGymPhone;
-      }
-      final savedCurrency = prefs.getString('selectedCurrency');
-      if (savedCurrency != null) selectedCurrency = savedCurrency;
-      final savedConversion = prefs.getBool('showConversion');
-      if (savedConversion != null) showConversion = savedConversion;
-      final savedUsd = prefs.getDouble('usdToVes');
-      if (savedUsd != null && savedUsd > 0) usdToVes = savedUsd;
-      final savedEur = prefs.getDouble('eurToVes');
-      if (savedEur != null && savedEur > 0) eurToVes = savedEur;
-      final savedCop = prefs.getDouble('copToVes');
-      if (savedCop != null && savedCop > 0) copToVes = savedCop;
-      final savedQrMode = prefs.getString('qrMode');
-      if (savedQrMode != null) qrMode = savedQrMode;
-      final savedCapacity = prefs.getInt('capacity');
-      if (savedCapacity != null && savedCapacity > 0) capacity = savedCapacity;
-      final todayKey = _formatDateForCode(DateTime.now());
-      final savedDismissedDate = prefs.getString('dismissedDate') ?? '';
-      if (savedDismissedDate != todayKey) {
-        await prefs.setStringList('dismissedAlerts', []);
-        await prefs.setString('dismissedDate', todayKey);
-        dismissedAlerts = {};
-        dismissedDate = todayKey;
-      } else {
-        final saved = prefs.getStringList('dismissedAlerts') ?? [];
-        dismissedAlerts = saved.toSet();
-        dismissedDate = savedDismissedDate;
-      }
-      final membersStr = prefs.getString('members');
-      final plansStr = prefs.getString('plans');
-      final transactionsStr = prefs.getString('transactions');
-      final activitiesStr = prefs.getString('activities');
-      final routinesStr = prefs.getString('routines');
-      final exercisesStr = prefs.getString('exercises');
-      final trainersStr = prefs.getString('trainers');
-      final classesStr = prefs.getString('classes');
-      final classTypesStr = prefs.getString('classTypes');
-      final renewalStr = prefs.getString('renewalRequests');
-      final savedInside = prefs.getInt('inside');
-      if (membersStr != null) {
-        final loaded = (jsonDecode(membersStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          members.clear();
-          members.addAll(loaded);
-          activeMembers = members.length;
-        }
-      }
-      if (plansStr != null) {
-        final loaded = (jsonDecode(plansStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          plans.clear();
-          plans.addAll(loaded);
-        }
-      }
-      if (transactionsStr != null) {
-        final loaded = (jsonDecode(transactionsStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) transactions = loaded;
-      }
-      if (activitiesStr != null) {
-        final loaded = (jsonDecode(activitiesStr) as List)
-            .map((e) => Map<String, String>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          activities.clear();
-          activities.addAll(loaded);
-        }
-      }
-      if (routinesStr != null) {
-        final loaded = (jsonDecode(routinesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          routines.clear();
-          routines.addAll(loaded);
-        }
-      }
-      if (exercisesStr != null) {
-        final loaded = (jsonDecode(exercisesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          exercises.clear();
-          exercises.addAll(loaded);
-        }
-      }
-      if (trainersStr != null) {
-        final loaded = (jsonDecode(trainersStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          trainers.clear();
-          trainers.addAll(loaded);
-        }
-      }
-      if (classesStr != null) {
-        final loaded = (jsonDecode(classesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          classes.clear();
-          classes.addAll(loaded);
-        }
-      }
-      if (classTypesStr != null) {
-        final loaded = (jsonDecode(classTypesStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          classTypes.clear();
-          classTypes.addAll(loaded);
-        }
-      }
-      if (renewalStr != null) {
-        final loaded = (jsonDecode(renewalStr) as List)
-            .map((e) => Map<String, dynamic>.from(e))
-            .toList();
-        if (loaded.isNotEmpty) {
-          renewalRequests = loaded;
-        }
-      }
-      if (savedInside != null) inside = savedInside;
-    } catch (e) {
-      debugPrint('❌ Error cargando local: $e');
-    }
-  }
-
-  Future<void> loadMembers() async {
-    try {
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('members')
-          .select()
-          .order('created_at', ascending: false);
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, dynamic>>[];
-        for (final row in response) {
-          loaded.add({
-            'id': row['id'],
-            'name': row['name'] ?? '',
-            'cedula': row['cedula'] ?? '',
-            'phone': row['phone'] ?? '',
-            'plan': row['plan'] ?? '',
-            'expiry': row['expiry'] ?? '',
-            'status': row['status'] ?? 'ACTIVO',
-            'memberSince': row['member_since'] ?? '',
-            'payments': row['payments'] ?? 0,
-            'totalPaid': (row['total_paid'] as num?)?.toDouble() ?? 0.0,
-            'attendance': row['attendance'] ?? 0,
-            'lastVisit': row['last_visit'] ?? '',
-            'qrCode': row['qr_code'] ?? '',
-            'assignedRoutine': row['assigned_routine'] ?? '',
-            'assignedRoutineId': row['assigned_routine_id'] ?? '',
-          });
-        }
-        if (!mounted) return;
-        setState(() {
-          members.clear();
-          members.addAll(loaded);
-          activeMembers = members.length;
-        });
-        await _saveLocalData();
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading members: $e');
-    }
-  }
-
-  Future<void> loadPayments() async {
-    try {
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('payments')
-          .select(
-              'id, member_id, amount, method, status, created_at, members(name, plan)')
-          .order('created_at', ascending: false);
-      final loaded = <Map<String, dynamic>>[];
-      for (final row in response) {
-        final memberData = row['members'];
-        final createdAt =
-            DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
-        loaded.add({
-          'name': memberData != null
-              ? (memberData['name'] ?? 'Sin nombre')
-              : 'Sin miembro',
-          'concept':
-              memberData != null ? 'Plan ${memberData['plan'] ?? "—"}' : 'Pago',
-          'amount': (row['amount'] as num?)?.toDouble() ?? 0.0,
-          'method': (row['method'] ?? 'EFECTIVO').toString().toUpperCase(),
-          'date': _formatDate(createdAt),
-          'type': 'INGRESO',
-          'created_at': createdAt,
-        });
-      }
-      final calcMonthly = List<double>.filled(12, 0);
-      final currentYear = DateTime.now().year;
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        if (d.year == currentYear) {
-          calcMonthly[d.month - 1] += (t['amount'] as num).toDouble();
-        }
-      }
-      final calcMethods = <String, double>{
-        'TARJETA': 0,
-        'EFECTIVO': 0,
-        'TRANSFERENCIA': 0,
-      };
-      final twelveMonthsAgo =
-          DateTime.now().subtract(const Duration(days: 365));
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        if (d.isAfter(twelveMonthsAgo)) {
-          final m = t['method'].toString();
-          calcMethods[m] =
-              (calcMethods[m] ?? 0) + (t['amount'] as num).toDouble();
-        }
-      }
-      final calcWeekly = List<double>.filled(4, 0);
-      for (final t in loaded) {
-        final d = t['created_at'] as DateTime;
-        final diffDays = DateTime.now().difference(d).inDays;
-        if (diffDays < 28 && diffDays >= 0) {
-          final weekIndex = 3 - (diffDays ~/ 7);
-          if (weekIndex >= 0 && weekIndex < 4) {
-            calcWeekly[weekIndex] += (t['amount'] as num).toDouble();
-          }
-        }
-      }
-      final planSales = <String, Map<String, dynamic>>{};
-      for (final t in loaded) {
-        final concept = t['concept'].toString();
-        if (!planSales.containsKey(concept)) {
-          planSales[concept] = {'sales': 0, 'revenue': 0.0};
-        }
-        planSales[concept]!['sales'] =
-            (planSales[concept]!['sales'] as int) + 1;
-        planSales[concept]!['revenue'] =
-            (planSales[concept]!['revenue'] as double) +
-                (t['amount'] as num).toDouble();
-      }
-      final sortedPlans = planSales.entries.toList()
-        ..sort((a, b) => (b.value['revenue'] as double)
-            .compareTo(a.value['revenue'] as double));
-      final loadedTopPlans = <Map<String, dynamic>>[];
-      for (int i = 0; i < sortedPlans.length && i < 4; i++) {
-        final e = sortedPlans[i];
-        loadedTopPlans.add({
-          'name': e.key.replaceFirst('Plan ', ''),
-          'sales': e.value['sales'],
-          'revenue': e.value['revenue'],
-          'colorIndex': i,
-        });
-      }
-      double totalIngresos = 0;
-      for (final t in loaded) {
-        totalIngresos += (t['amount'] as num).toDouble();
-      }
-      if (!mounted) return;
-      if (loaded.isNotEmpty) {
-        setState(() {
-          transactions = loaded;
-          monthlyIncome = calcMonthly;
-          paymentMethods = calcMethods;
-          weeklyIncome = calcWeekly;
-          weeklyExpense = [0, 0, 0, 0];
-          topPlans = loadedTopPlans;
-          income = totalIngresos;
-        });
-        await _saveLocalData();
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading payments: $e');
-    }
-  }
-
-  Future<void> loadPlans() async {
-    try {
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('plans')
-          .select()
-          .order('created_at', ascending: true);
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, dynamic>>[];
-        for (final row in response) {
-          loaded.add({
-            'id': row['id'],
-            'name': row['name'] ?? '',
-            'price': (row['price'] as num?)?.toDouble() ?? 0.0,
-            'days': (row['days'] as num?)?.toInt() ?? 30,
-            'access': row['access'] ?? 'ILIMITADO',
-          });
-        }
-        if (!mounted) return;
-        setState(() {
-          plans.clear();
-          plans.addAll(loaded);
-        });
-        await _saveLocalData();
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading plans: $e');
-    }
-  }
-
-  Future<void> loadActivities() async {
-    try {
-      final supabase = Supabase.instance.client;
-      final response = await supabase
-          .from('activities')
-          .select()
-          .order('created_at', ascending: false)
-          .limit(50);
-      if (response.isNotEmpty) {
-        final loaded = <Map<String, String>>[];
-        for (final row in response) {
-          final createdAt =
-              DateTime.tryParse(row['created_at'].toString()) ?? DateTime.now();
-          loaded.add({
-            'type': row['type'] ?? '',
-            'name': row['name'] ?? '',
-            'time':
-                '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}',
-          });
-        }
-        if (!mounted) return;
-        setState(() {
-          activities.clear();
-          activities.addAll(loaded);
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error loading activities: $e');
-    }
-  }
-
-  Future<void> loadCheckins() async {
-    try {
-      if (mounted) setState(() => loadingCheckins = true);
-      final supabase = Supabase.instance.client;
-      final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
-      final response = await supabase
-          .from('checkins')
-          .select()
-          .gte('created_at', startOfDayStr)
-          .order('created_at', ascending: true);
-      int entradas = 0;
-      int salidas = 0;
-      for (final row in response) {
-        final type = (row['type'] ?? '').toString().toUpperCase();
-        final authorized = row['authorized'] ?? true;
-        if (type == 'ENTRADA' && authorized == true) {
-          entradas++;
-        } else if (type == 'SALIDA') {
-          salidas++;
-        }
-      }
-      final calculated = entradas - salidas;
-      final finalInside = calculated < 0 ? 0 : calculated;
-      if (!mounted) return;
-      setState(() {
-        inside = finalInside;
-        loadingCheckins = false;
-      });
-      await loadInsidePeople();
-    } catch (e) {
-      debugPrint('❌ Error cargando checkins: $e');
-      if (mounted) setState(() => loadingCheckins = false);
-    }
-  }
-
-  Future<void> loadInsidePeople() async {
-    try {
-      final supabase = Supabase.instance.client;
-      final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
-      final checkins = await supabase
-          .from('checkins')
-          .select('member_id, type, created_at, members(name, plan, phone)')
-          .gte('created_at', startOfDayStr)
-          .order('created_at', ascending: true);
-
-      final Map<String, Map<String, dynamic>> state = {};
-      for (final row in checkins) {
-        final mid = row['member_id']?.toString();
-        if (mid == null) continue;
-        final type = (row['type'] ?? '').toString().toUpperCase();
-        final memberData = row['members'];
-        final name = memberData != null
-            ? (memberData['name'] ?? 'Sin nombre')
-            : 'Sin nombre';
-        final plan = memberData != null ? (memberData['plan'] ?? '—') : '—';
-        final phone = memberData != null ? (memberData['phone'] ?? '') : '';
-        final createdAt =
-            DateTime.tryParse(row['created_at'].toString()) ?? now;
-
-        if (type == 'ENTRADA') {
-          state[mid] = {
-            'id': mid,
-            'name': name,
-            'plan': plan,
-            'phone': phone,
-            'entryTime': createdAt,
-          };
-        } else if (type == 'SALIDA') {
-          state.remove(mid);
-        }
-      }
-      if (!mounted) return;
-      setState(() {
-        insidePeople = state.values.toList()
-          ..sort((a, b) => (b['entryTime'] as DateTime)
-              .compareTo(a['entryTime'] as DateTime));
-      });
-    } catch (e) {
-      debugPrint('❌ Error cargando aforo detallado: $e');
-    }
-  }
-
-  Future<void> loadAllData() async {
-    await _loadLocalData();
-    if (mounted) setState(() => loadingData = false);
-    _syncWithSupabase();
-  }
-
-  Future<void> _syncWithSupabase() async {
-    try {
-      Supabase.instance.client;
-    } catch (_) {
-      try {
-        await Supabase.initialize(
-          url: SupabaseConfig.supabaseUrl,
-          anonKey: SupabaseConfig.supabaseAnonKey,
-        );
-        await Future.delayed(const Duration(milliseconds: 500));
-      } catch (e) {
-        debugPrint('⚠️ Sin conexión a Supabase. Modo offline.');
-        return;
-      }
-    }
-    bool ready = false;
-    for (int i = 0; i < 30; i++) {
-      try {
-        Supabase.instance.client;
-        ready = true;
-        break;
-      } catch (_) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-    }
-    if (!ready) return;
-    try {
-      await loadPlans();
-    } catch (_) {}
-    try {
-      await loadMembers();
-    } catch (_) {}
-    try {
-      await loadPayments();
-    } catch (_) {}
-    try {
-      await loadActivities();
-    } catch (_) {}
-    try {
-      await loadCheckins();
-    } catch (_) {}
-    await _saveLocalData();
-  }
-
-  String _formatDate(DateTime d) {
-    final now = DateTime.now();
-    final diff = now.difference(d);
-    if (diff.inHours < 24 && now.day == d.day) {
-      return 'Hoy ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    }
-    if (diff.inDays < 2) {
-      return 'Ayer ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-    }
-    return '${d.day}/${d.month}/${d.year}';
-  }
-
-  String _calculateExpiryDate(String planName, DateTime from) {
-    int days = 30;
-    for (final p in plans) {
-      if (p['name'].toString().toLowerCase() == planName.toLowerCase()) {
-        days = (p['days'] as num?)?.toInt() ?? 30;
-        break;
-      }
-    }
-    final expiry = from.add(Duration(days: days));
-    return '${expiry.day.toString().padLeft(2, '0')} ${_monthName(expiry.month)} ${expiry.year}';
-  }
-
-  String _formatMemberSince(DateTime d) {
-    return '${d.day.toString().padLeft(2, '0')} ${_monthName(d.month)} ${d.year}';
-  }
-
-  String _monthName(int month) {
-    const months = [
-      'ENE',
-      'FEB',
-      'MAR',
-      'ABR',
-      'MAY',
-      'JUN',
-      'JUL',
-      'AGO',
-      'SEP',
-      'OCT',
-      'NOV',
-      'DIC',
-    ];
-    if (month < 1 || month > 12) return 'ENE';
-    return months[month - 1];
-  }
-
-  String _generateToken() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = math.Random();
-    String result = '';
-    for (int i = 0; i < 6; i++) {
-      result += chars[random.nextInt(chars.length)];
-    }
-    return result;
-  }
-
-  String _formatDateForCode(DateTime d) {
-    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-  }
-
-  String formatPrice(double priceInUsd) {
-    final priceInBs = priceInUsd * usdToVes;
-    double converted;
-    String symbol;
-    switch (selectedCurrency) {
-      case 'USD':
-        converted = priceInUsd;
-        symbol = '\$';
-        break;
-      case 'EUR':
-        converted = priceInBs / eurToVes;
-        symbol = '€';
-        break;
-      case 'VES':
-        converted = priceInBs;
-        symbol = 'Bs. ';
-        break;
-      case 'COP':
-        converted = priceInBs / copToVes;
-        symbol = '\$';
-        break;
-      default:
-        converted = priceInUsd;
-        symbol = '\$';
-    }
-    if (selectedCurrency == 'VES' || selectedCurrency == 'COP') {
-      return '$symbol${converted.toStringAsFixed(0)}';
-    }
-    return '$symbol${converted.toStringAsFixed(2)}';
-  }
-
-  String formatPriceSecondary(double priceInUsd) {
-    if (!showConversion) return '';
-    if (selectedCurrency == 'VES') {
-      return '≈ \$${priceInUsd.toStringAsFixed(2)}';
-    } else {
-      final ves = priceInUsd * usdToVes;
-      return 'Bs. ${ves.toStringAsFixed(0)}';
-    }
-  }
-
-  Future<void> addActivity(String type, String name) async {
-    if (!mounted) return;
-    final now = DateTime.now();
-    final time =
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-    setState(() {
-      activities.insert(0, {
-        'type': type,
-        'name': name,
-        'time': time,
-      });
-      if (activities.length > 50) activities.removeLast();
-    });
-    try {
-      final supabase = Supabase.instance.client;
-      await supabase.from('activities').insert({
-        'type': type,
-        'name': name,
-      });
-    } catch (e) {
-      debugPrint('⚠️ Actividad solo local: $e');
-    }
-    await _saveLocalData();
-  }
-
-  IconData _iconFromCodePoint(int codePoint) {
-    switch (codePoint) {
-      case 0xe4a4:
-        return Icons.self_improvement;
-      case 0xe4a7:
-        return Icons.directions_bike;
-      case 0xe4a8:
-        return Icons.fitness_center;
-      case 0xe4a9:
-        return Icons.sports_mma;
-      case 0xe4aa:
-        return Icons.accessibility_new;
-      case 0xe4ab:
-        return Icons.sports_gymnastics;
-      case 0xe4ac:
-        return Icons.sports_martial_arts;
-      case 0xe4ad:
-        return Icons.sports_handball;
-      default:
-        return Icons.fitness_center;
-    }
-  }
-
-  void generateGymQr() {
-    final now = DateTime.now();
-    final token = _generateToken();
-    String code;
-    DateTime exp;
-    switch (qrMode) {
-      case 'DIARIO':
-        code = 'SYNTH-GYM-${_formatDateForCode(now)}-$token';
-        exp = DateTime(now.year, now.month, now.day, 23, 59, 59);
-        break;
-      case 'SEMANAL':
-        code = 'SYNTH-GYM-WEEK-${_formatDateForCode(now)}-$token';
-        exp = now.add(const Duration(days: 7));
-        break;
-      case 'FIJO':
-      default:
-        code = 'SYNTH-GYM-FIXED-$token';
-        exp = now.add(const Duration(days: 3650));
-        break;
-    }
-    setState(() {
-      qrToken = code;
-      qrGenerated = now;
-      qrExpires = exp;
-    });
-  }
-
-  String get qrTimeLeft {
-    final now = DateTime.now();
-    final diff = qrExpires.difference(now);
-    if (diff.isNegative) return 'EXPIRADO';
-    if (diff.inDays > 0) return 'Expira en ${diff.inDays} dia(s)';
-    if (diff.inHours > 0) return 'Expira en ${diff.inHours} hora(s)';
-    return 'Expira en ${diff.inMinutes} minuto(s)';
-  }
-
   Future<void> resetAforo() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -2325,39 +2500,49 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             Icon(Icons.warning_amber_rounded,
                 color: dialogContext.colors.red, size: 22),
             const SizedBox(width: 10),
-            Text('RESET TOTAL DEL AFORO',
-                style: TextStyle(
-                  color: dialogContext.colors.white,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 15,
-                )),
+            Expanded(
+              child: Text('RESET TOTAL DEL AFORO',
+                  style: TextStyle(
+                    color: dialogContext.colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 15,
+                  )),
+            ),
           ]),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Esto hará lo siguiente:',
+                'Esto borrará TODOS los registros del día en la nube y en el dispositivo, y pondrá el aforo a 0.',
                 style: TextStyle(
-                  color: dialogContext.colors.white,
-                  fontWeight: FontWeight.w700,
+                  color: dialogContext.colors.muted,
                   fontSize: 13,
                 ),
               ),
-              const SizedBox(height: 10),
-              _resetBullet('Borrar TODOS los checkins de hoy en Supabase'),
-              _resetBullet('Borrar TODAS las actividades de hoy en Supabase'),
-              _resetBullet('Aforo actual → 0 (admin y cliente)'),
-              _resetBullet('Lista de personas dentro → vacía'),
-              _resetBullet('Contadores de actividad del día → 0'),
               const SizedBox(height: 12),
-              Text(
-                'Esta acción BORRA datos en la nube y en el dispositivo. No se puede deshacer.',
-                style: TextStyle(
-                  color: dialogContext.colors.red,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: dialogContext.colors.red.withValues(alpha: .10),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                      color: dialogContext.colors.red.withValues(alpha: .35)),
                 ),
+                child: Row(children: [
+                  Icon(Icons.info_outline_rounded,
+                      color: dialogContext.colors.red, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Úsalo solo al cerrar el día. No se puede deshacer.',
+                      style: TextStyle(
+                        color: dialogContext.colors.white,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ]),
               ),
             ],
           ),
@@ -2385,61 +2570,100 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     if (confirm != true) return;
 
     setState(() => loadingCheckins = true);
+
+    bool cloudOk = true;
+    String? cloudError;
+
+    // ─── 1. BORRAR EN SUPABASE ───
     try {
       final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria: inicio del día LOCAL → UTC
       final now = DateTime.now();
-      final startOfDay =
-          DateTime(now.year, now.month, now.day).toIso8601String();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
 
-      await supabase.from('checkins').delete().gte('created_at', startOfDay);
-      await supabase.from('activities').delete().gte('created_at', startOfDay);
+      debugPrint('🗑️ Reseteando desde: $startOfDayUtc');
 
-      if (!mounted) return;
+      // Borrar check-ins del día
+      final deletedCheckins = await supabase
+          .from('checkins')
+          .delete()
+          .gte('created_at', startOfDayUtc)
+          .select('id');
+      debugPrint('✅ Check-ins borrados: ${deletedCheckins.length}');
+
+      // Borrar actividades del día
+      final deletedActivities = await supabase
+          .from('activities')
+          .delete()
+          .gte('created_at', startOfDayUtc)
+          .select('id');
+      debugPrint('✅ Actividades borradas: ${deletedActivities.length}');
+
+      // ✅ Borrar solicitudes de renovación locales para no dejar pendientes
       setState(() {
-        inside = 0;
-        clientInsideCount = 0;
-        insidePeople.clear();
-        activities.clear();
-        activities.insert(0, {
-          'type': 'SISTEMA',
-          'name': 'Aforo reiniciado manualmente',
-          'time':
-              '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
-        });
+        renewalRequests.clear();
       });
+    } catch (e) {
+      cloudOk = false;
+      cloudError = e.toString();
+      debugPrint('❌ Error reset en Supabase: $e');
+    }
 
-      await _saveLocalData();
-      await loadCheckins();
-      await loadActivities();
-      await loadInsidePeople();
+    // ─── 2. RESET LOCAL (siempre, aunque falle la nube) ───
+    if (!mounted) return;
+    setState(() {
+      inside = 0;
+      clientInsideCount = 0;
+      insidePeople.clear();
+      activities.clear();
+      activities.insert(0, {
+        'type': 'SISTEMA',
+        'name': 'Día reiniciado',
+        'time':
+            '${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+      });
+    });
 
-      if (!mounted) return;
+    await _saveLocalData();
+
+    // ─── 3. ESPERAR Y RECARGAR DESDE LA NUBE (verificar) ───
+    await Future.delayed(const Duration(seconds: 1));
+
+    if (cloudOk) {
+      try {
+        await loadCheckins();
+        await loadActivities();
+        await loadInsidePeople();
+        await loadClientAforo();
+      } catch (e) {
+        debugPrint('⚠️ Error recargando tras reset: $e');
+      }
+    }
+
+    if (!mounted) return;
+
+    // ─── 4. FEEDBACK FINAL ───
+    if (cloudOk) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Text('✅ Aforo y actividad del día reseteados a 0'),
+          content: const Text('✅ Todo reiniciado a 0 (Local y Nube)'),
           backgroundColor: context.colors.green,
           duration: const Duration(seconds: 3),
         ),
       );
-    } catch (e) {
-      debugPrint('❌ Error al resetear: $e');
-      if (!mounted) return;
-      setState(() {
-        inside = 0;
-        clientInsideCount = 0;
-        insidePeople.clear();
-        activities.clear();
-      });
-      await _saveLocalData();
+    } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('⚠️ Reset local aplicado. Error en nube: $e'),
+          content: Text('⚠️ Reset local aplicado. Error en nube: $cloudError'),
           backgroundColor: context.colors.yellow,
+          duration: const Duration(seconds: 5),
         ),
       );
-    } finally {
-      if (mounted) setState(() => loadingCheckins = false);
     }
+
+    setState(() => loadingCheckins = false);
   }
 
   Future<void> showResetDayDialog() => resetAforo();
@@ -2470,15 +2694,27 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     try {
       final Uint8List? imageBytes = await _qrScreenshotController.capture();
       if (imageBytes == null) return;
-      await Clipboard.setData(ClipboardData(text: qrToken));
-      if (mounted) {
-        final ctx = context;
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(
-            content: Text('QR token copiado: $qrToken'),
-            backgroundColor: ctx.colors.green,
-          ),
-        );
+
+      if (kIsWeb) {
+        final blob = html.Blob([imageBytes], 'image/png');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final anchor = html.AnchorElement(href: url)
+          ..setAttribute('download', 'QR_Synthetix_Gym.png');
+        anchor.click();
+        html.Url.revokeObjectUrl(url);
+      } else {
+        final directory = await getApplicationDocumentsDirectory();
+        final filePath = '${directory.path}/QR_Synthetix_Gym.png';
+        final file = File(filePath);
+        await file.writeAsBytes(imageBytes);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Guardado en: $filePath'),
+              backgroundColor: context.colors.green,
+            ),
+          );
+        }
       }
     } catch (e) {
       debugPrint('Error: $e');
@@ -2489,30 +2725,27 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     try {
       final Uint8List? imageBytes = await _qrScreenshotController.capture();
       if (imageBytes == null) return;
+
       if (kIsWeb) {
-        final text = 'Accede con este QR: $qrToken\nVálido: $qrTimeLeft';
-        await Clipboard.setData(ClipboardData(text: text));
-        if (mounted) {
-          final ctx = context;
-          ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(
-              content: Text('QR copiado: $qrToken'),
-              backgroundColor: ctx.colors.blue,
-            ),
-          );
-        }
-        return;
+        final blob = html.Blob([imageBytes], 'image/png');
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final anchor = html.AnchorElement(href: url)
+          ..setAttribute('download', 'QR_Synthetix_Gym.png');
+        anchor.click();
+        html.Url.revokeObjectUrl(url);
+      } else {
+        final directory = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
+        final file = File(filePath);
+        await file.writeAsBytes(imageBytes);
+
+        await Share.shareXFiles(
+          [XFile(filePath)],
+          text: 'QR de acceso SYNTHETIX GYM\n$qrToken\n$qrTimeLeft',
+          subject: 'Acceso QR - SYNTHETIX GYM',
+        );
       }
-      final directory = await getTemporaryDirectory();
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final filePath = '${directory.path}/synth_gym_qr_$timestamp.png';
-      final file = File(filePath);
-      await file.writeAsBytes(imageBytes);
-      await Share.shareXFiles(
-        [XFile(filePath)],
-        text: 'QR de acceso SYNTHETIX GYM\n$qrToken\n$qrTimeLeft',
-        subject: 'Acceso QR - SYNTHETIX GYM',
-      );
     } catch (e) {
       debugPrint('Error: $e');
     }
@@ -5167,266 +5400,372 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   Widget _mobileDrawer() {
-    final items = [
-      [Icons.grid_view_rounded, 'Command Center'],
-      [Icons.people_alt_rounded, 'Clientes'],
-      [Icons.qr_code_scanner_rounded, 'Acceso QR'],
-      [Icons.card_membership_rounded, 'Membresías'],
-      [Icons.payments_rounded, 'Finanzas'],
-      [Icons.fitness_center_rounded, 'Entrenamiento'],
-      [Icons.notifications_active_rounded, 'Alertas'],
-      [Icons.settings_rounded, 'Configuración'],
-    ];
+    final primaryColor = context.colors.red;
+    final textWhite = context.colors.white;
+    final textMuted = context.colors.muted;
+
     return Drawer(
-      backgroundColor: context.colors.panel,
+      backgroundColor: context.colors.bg,
       child: SafeArea(
         child: Column(
           children: [
+            // ─── HEADER DEL DRAWER ───
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
               child: Row(
                 children: [
                   Container(
-                    width: 46,
-                    height: 46,
+                    width: 50,
+                    height: 50,
                     decoration: BoxDecoration(
-                      color: context.colors.red,
-                      borderRadius: BorderRadius.circular(13),
+                      color: primaryColor,
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: primaryColor.withValues(alpha: 0.4),
+                          blurRadius: 15,
+                          offset: const Offset(0, 5),
+                        )
+                      ],
                     ),
                     child: const Icon(Icons.bolt_rounded,
-                        color: Colors.white, size: 28),
+                        color: Colors.white, size: 30),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 14),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('SYNTHETIX',
                             style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 16,
+                              color: textWhite,
+                              fontSize: 18,
                               fontWeight: FontWeight.w900,
-                              letterSpacing: 1.4,
+                              letterSpacing: 1,
                             )),
                         const SizedBox(height: 2),
                         Text('GYM OS PRO',
                             style: TextStyle(
-                              color: context.colors.muted,
+                              color: textMuted,
                               fontSize: 11,
                               fontWeight: FontWeight.w700,
-                              letterSpacing: 1,
+                              letterSpacing: 1.5,
                             )),
                       ],
                     ),
                   ),
                   IconButton(
                     onPressed: () => Navigator.pop(context),
-                    icon:
-                        Icon(Icons.close_rounded, color: context.colors.muted),
+                    icon: Icon(Icons.close_rounded, color: textMuted),
                   ),
                 ],
               ),
             ),
-            Divider(color: context.colors.border, height: 1),
-            const SizedBox(height: 12),
+
+            Divider(
+                color: context.colors.border.withValues(alpha: 0.5), height: 1),
+
+            // ─── LISTA DE OPCIONES ───
             Expanded(
-              child: ListView.builder(
-                itemCount: items.length,
-                itemBuilder: (context, index) {
-                  final selected = index == _section;
-                  final isAlerts = index == 6;
-                  final ac = alertCount(context) + renewalRequests.length;
-                  return Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(14),
-                        onTap: () {
-                          _goToSection(index);
-                          Navigator.pop(context);
-                        },
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 15),
-                          decoration: BoxDecoration(
-                            color: selected
-                                ? context.colors.red.withValues(alpha: .13)
-                                : Colors.transparent,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: selected
-                                  ? context.colors.red.withValues(alpha: .45)
-                                  : Colors.transparent,
-                            ),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(items[index][0] as IconData,
-                                  color: selected
-                                      ? context.colors.red
-                                      : context.colors.muted,
-                                  size: 22),
-                              const SizedBox(width: 14),
-                              Expanded(
-                                child: Text(items[index][1] as String,
-                                    style: TextStyle(
-                                      color: selected
-                                          ? context.colors.white
-                                          : context.colors.muted,
-                                      fontSize: 14,
-                                      fontWeight: selected
-                                          ? FontWeight.w800
-                                          : FontWeight.w600,
-                                    )),
+              child: ListView(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                children: [
+                  _buildDrawerItem(
+                    icon: Icons.grid_view_rounded,
+                    title: 'Command Center',
+                    subtitle: 'Resumen general del gimnasio',
+                    color: Colors.blueAccent,
+                    isSelected: _section == 0,
+                    onTap: () {
+                      _goToSection(0);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.people_alt_rounded,
+                    title: 'Clientes',
+                    subtitle: 'Gestión de miembros',
+                    color: Colors.greenAccent,
+                    isSelected: _section == 1,
+                    onTap: () {
+                      _goToSection(1);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.qr_code_scanner_rounded,
+                    title: 'Acceso QR',
+                    subtitle: 'Control de entradas y salidas',
+                    color: Colors.cyanAccent,
+                    isSelected: _section == 2,
+                    onTap: () {
+                      _goToSection(2);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.card_membership_rounded,
+                    title: 'Membresías',
+                    subtitle: 'Planes y suscripciones',
+                    color: Colors.orangeAccent,
+                    isSelected: _section == 3,
+                    onTap: () {
+                      _goToSection(3);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.payments_rounded,
+                    title: 'Finanzas',
+                    subtitle: 'Ingresos y estadísticas',
+                    color: Colors.purpleAccent,
+                    isSelected: _section == 4,
+                    onTap: () {
+                      _goToSection(4);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.fitness_center_rounded,
+                    title: 'Entrenamiento',
+                    subtitle: 'Clases, rutinas y entrenadores',
+                    color: Colors.pinkAccent,
+                    isSelected: _section == 5,
+                    onTap: () {
+                      _goToSection(5);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.notifications_active_rounded,
+                    title: 'Alertas',
+                    subtitle: 'Notificaciones pendientes',
+                    color: Colors.redAccent,
+                    isSelected: _section == 6,
+                    badgeCount: alertCount(context) + renewalRequests.length,
+                    onTap: () {
+                      _goToSection(6);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  _buildDrawerItem(
+                    icon: Icons.settings_rounded,
+                    title: 'Configuración',
+                    subtitle: 'Ajustes generales',
+                    color: Colors.grey,
+                    isSelected: _section == 7,
+                    onTap: () {
+                      _goToSection(7);
+                      Navigator.pop(context);
+                    },
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // ─── SEPARADOR DE SISTEMA ───
+                  Row(
+                    children: [
+                      Expanded(
+                          child: Divider(
+                              color: context.colors.border
+                                  .withValues(alpha: 0.5))),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.warning_amber_rounded,
+                                color: Colors.orange, size: 14),
+                            const SizedBox(width: 4),
+                            Text(
+                              'Ajustes de Sistema',
+                              style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
                               ),
-                              if (isAlerts && ac > 0)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 7, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: context.colors.red,
-                                    borderRadius: BorderRadius.circular(20),
-                                  ),
-                                  child: Text('$ac',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w900,
-                                      )),
-                                ),
-                              if (selected)
-                                Container(
-                                  margin: const EdgeInsets.only(left: 6),
-                                  width: 8,
-                                  height: 8,
-                                  decoration: BoxDecoration(
-                                      color: context.colors.red,
-                                      shape: BoxShape.circle),
-                                ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
                       ),
-                    ),
-                  );
-                },
+                      Expanded(
+                          child: Divider(
+                              color: context.colors.border
+                                  .withValues(alpha: 0.5))),
+                    ],
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // ─── MODO CLARO / OSCURO ───
+                  _buildDrawerItem(
+                    icon: themeController.isDark
+                        ? Icons.light_mode_rounded
+                        : Icons.dark_mode_rounded,
+                    title:
+                        themeController.isDark ? 'Modo Claro' : 'Modo Oscuro',
+                    subtitle: 'Cambiar la apariencia',
+                    color: Colors.yellow,
+                    onTap: () {
+                      themeController.toggle();
+                      Navigator.pop(context);
+                    },
+                  ),
+
+                  // ─── CERRAR SESIÓN ───
+                  _buildDrawerItem(
+                    icon: Icons.logout_rounded,
+                    title: 'Cerrar Sesión',
+                    subtitle: 'Salir del sistema',
+                    color: primaryColor,
+                    isDanger: true,
+                    onTap: () {
+                      Navigator.pop(context);
+                      confirmLogout();
+                    },
+                  ),
+                ],
               ),
             ),
+
+            // ─── FOOTER ───
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(14),
-                  onTap: () => themeController.toggle(),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 15),
-                    decoration: BoxDecoration(
-                      color: context.colors.panel2,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: context.colors.border),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          themeController.isDark
-                              ? Icons.light_mode_rounded
-                              : Icons.dark_mode_rounded,
-                          color: context.colors.red,
-                          size: 22,
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(
-                            themeController.isDark
-                                ? 'Cambiar a modo claro'
-                                : 'Cambiar a modo oscuro',
-                            style: TextStyle(
-                              color: context.colors.white,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.shield_rounded,
+                      color: context.colors.green, size: 16),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Sistema Operativo v1.0',
+                    style: TextStyle(
+                      color: textMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(14),
-                  onTap: () {
-                    Navigator.pop(context);
-                    confirmLogout();
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 15),
+                  const SizedBox(width: 8),
+                  Container(
+                    width: 8,
+                    height: 8,
                     decoration: BoxDecoration(
-                      color: context.colors.red.withValues(alpha: .10),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                          color: context.colors.red.withValues(alpha: .30)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.logout_rounded,
-                            color: context.colors.red, size: 22),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text('CERRAR SESIÓN',
-                              style: TextStyle(
-                                color: context.colors.red,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 0.5,
-                              )),
-                        ),
-                      ],
-                    ),
+                        color: context.colors.green,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: context.colors.green.withValues(alpha: 0.5),
+                            blurRadius: 6,
+                          )
+                        ]),
                   ),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: context.colors.panel2,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: context.colors.border),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.shield_rounded,
-                        color: context.colors.green, size: 20),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text('SISTEMA OPERATIVO',
-                          style: TextStyle(
-                            color: context.colors.muted,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w800,
-                          )),
-                    ),
-                    CircleAvatar(
-                        radius: 4, backgroundColor: context.colors.green),
-                  ],
-                ),
+                ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  // ─── WIDGET AUXILIAR PARA LAS OPCIONES DEL DRAWER ───
+  Widget _buildDrawerItem({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required VoidCallback onTap,
+    bool isSelected = false,
+    bool isDanger = false,
+    int badgeCount = 0,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 250),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? color.withValues(alpha: 0.1)
+                  : (isDanger
+                      ? context.colors.red.withValues(alpha: 0.05)
+                      : Colors.transparent),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: isSelected
+                    ? color.withValues(alpha: 0.3)
+                    : (isDanger
+                        ? context.colors.red.withValues(alpha: 0.2)
+                        : Colors.transparent),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon,
+                      color: isDanger ? context.colors.red : color, size: 22),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          color: isDanger
+                              ? context.colors.red
+                              : context.colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: context.colors.muted,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (badgeCount > 0)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: context.colors.red,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '$badgeCount',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  )
+                else
+                  Icon(Icons.arrow_forward_ios_rounded,
+                      color: context.colors.muted.withValues(alpha: 0.5),
+                      size: 14),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -5510,6 +5849,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 onPressed: () {
                   _sectionHistory.clear();
                   setState(() => _section = 0);
+                  _stopQrRefreshTimer();
                 },
               ),
           ],
@@ -5892,12 +6232,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         expired: expiredCount,
         activities: activities,
         notificationCount: ac,
-        adminName: 'Admin',
+        adminName: 'SYNTHETIX',
         onScan: showAccessScanner,
         onNewPayment: newPayment,
         onNewMember: addMember,
         onOpenNotifications: showNotifications,
-        onOpenMore: () => _scaffoldKey.currentState?.openDrawer(),
+        onOpenMore: () => _goToSection(6),
         onOpenMemberships: () => _goToSection(3),
         onOpenClients: () => _goToSection(1),
         onOpenFinance: () => _goToSection(4),
@@ -8429,25 +8769,57 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     const SizedBox(width: 10),
                     SizedBox(
                       height: 56,
-                      width: 90,
+                      width: 105,
                       child: ElevatedButton(
                         onPressed: () async {
                           final v =
                               int.tryParse(_capacityController.text.trim());
-                          if (v != null && v > 0) {
-                            setState(() => capacity = v);
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setInt('capacity', v);
+                          if (v == null || v <= 0) {
                             if (mounted) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
-                                  content:
-                                      Text('✅ Aforo actualizado a $v personas'),
-                                  backgroundColor: context.colors.green,
+                                  content: const Text(
+                                      'Ingresa una capacidad válida (> 0)'),
+                                  backgroundColor: context.colors.yellow,
                                 ),
                               );
                             }
+                            return;
                           }
+
+                          // 1. Guardar local siempre
+                          setState(() => capacity = v);
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.setInt('capacity', v);
+
+                          // 2. Guardar en Supabase (gym_settings)
+                          bool cloudOk = false;
+                          try {
+                            await Supabase.instance.client
+                                .from('gym_settings')
+                                .upsert(
+                              {'key': 'capacity', 'value': v.toString()},
+                              onConflict: 'key',
+                            );
+                            cloudOk = true;
+                          } catch (e) {
+                            debugPrint(
+                                '⚠️ Error guardando capacity en Supabase: $e');
+                          }
+
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                cloudOk
+                                    ? '✅ Aforo actualizado a $v personas (Nube + Local)'
+                                    : '⚠️ Guardado solo local. Error en nube.',
+                              ),
+                              backgroundColor: cloudOk
+                                  ? context.colors.green
+                                  : context.colors.yellow,
+                            ),
+                          );
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: context.colors.red,
@@ -8568,6 +8940,20 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                   width: double.infinity,
                   child: ElevatedButton.icon(
                     onPressed: () async {
+                      final cleanPhone =
+                          gymPhone.replaceAll(RegExp(r'[^0-9]'), '');
+                      if (cleanPhone.length < 8) {
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: const Text(
+                                  'Ingresa un número de WhatsApp válido'),
+                              backgroundColor: context.colors.yellow,
+                            ),
+                          );
+                        }
+                        return;
+                      }
                       await _saveLocalData();
                       if (mounted) {
                         final ctx = context;
@@ -10106,19 +10492,24 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     String type = 'ENTRADA';
     try {
       final supabase = Supabase.instance.client;
+
+      // ✅ FIX zona horaria
       final now = DateTime.now();
-      final startOfDay = DateTime(now.year, now.month, now.day);
-      final startOfDayStr = startOfDay.toIso8601String();
+      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+
       final todayCheckins = await supabase
           .from('checkins')
-          .select()
+          .select('type')
           .eq('member_id', memberId)
-          .gte('created_at', startOfDayStr)
+          .gte('created_at', startOfDayUtc)
           .order('created_at', ascending: true);
+
       final lastType = todayCheckins.isNotEmpty
           ? todayCheckins.last['type'].toString().toUpperCase()
           : '';
       type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
+
       await supabase.from('checkins').insert({
         'member_id': memberId,
         'type': type,
@@ -10126,10 +10517,12 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         'reason': isBlocked ? 'Membresía $status' : null,
         'registered_by': 'admin',
       });
+
       await supabase.from('activities').insert({
         'type': isBlocked ? 'BLOQUEADO' : type,
         'name': memberName,
       });
+
       if (type == 'ENTRADA' && !isBlocked) {
         final attendance = (found['attendance'] as num?)?.toInt() ?? 0;
         await supabase.from('members').update({
@@ -10148,13 +10541,17 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         if (mounted) {
           setState(() {
             if (clientInsideCount > 0) clientInsideCount--;
+            if (inside > 0) inside--;
           });
         }
       }
-      if (mounted)
+
+      if (mounted) {
         await addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
+      }
       await loadActivities();
       await loadCheckins();
+      await loadInsidePeople();
       await _saveLocalData();
       if (!mounted) return;
       await _showAccessOverlay(
@@ -10183,53 +10580,225 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     }
   }
 
+  // ✅ FIX: registerExit ahora permite elegir quién sale
   Future<void> registerExit() async {
-    if (inside <= 0) return;
+    await loadInsidePeople();
+    if (!mounted) return;
+
+    if (insidePeople.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Nadie está dentro ahora mismo'),
+          backgroundColor: context.colors.yellow,
+        ),
+      );
+      return;
+    }
+
+    final selected = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          margin: EdgeInsets.only(
+              top: MediaQuery.of(sheetContext).padding.top + 40),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.bg,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: sheetContext.colors.muted.withValues(alpha: .4),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: sheetContext.colors.green.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                      child: Icon(Icons.logout_rounded,
+                          color: sheetContext.colors.green, size: 22),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('REGISTRAR SALIDA',
+                              style: TextStyle(
+                                color: sheetContext.colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                              )),
+                          const SizedBox(height: 2),
+                          Text(
+                              'Selecciona quién sale del gimnasio (${insidePeople.length} dentro)',
+                              style: TextStyle(
+                                color: sheetContext.colors.muted,
+                                fontSize: 11,
+                              )),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(sheetContext),
+                      icon: Icon(Icons.close_rounded,
+                          color: sheetContext.colors.muted, size: 22),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(sheetContext).size.height * 0.6,
+                  ),
+                  child: ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                    itemCount: insidePeople.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (_, i) {
+                      final p = insidePeople[i];
+                      final entry = p['entryTime'] as DateTime;
+                      final mins = DateTime.now().difference(entry).inMinutes;
+                      final timeStr =
+                          '${entry.hour.toString().padLeft(2, '0')}:${entry.minute.toString().padLeft(2, '0')}';
+                      final name = p['name'].toString();
+                      final initial =
+                          name.isEmpty ? '?' : name[0].toUpperCase();
+                      return Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () => Navigator.pop(sheetContext, p),
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: sheetContext.colors.panel,
+                              borderRadius: BorderRadius.circular(14),
+                              border:
+                                  Border.all(color: sheetContext.colors.border),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: sheetContext.colors.green
+                                        .withValues(alpha: .15),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Text(initial,
+                                      style: TextStyle(
+                                        color: sheetContext.colors.green,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 16,
+                                      )),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(name,
+                                          style: TextStyle(
+                                            color: sheetContext.colors.white,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                          '${p['plan']} · entró $timeStr · $mins min',
+                                          style: TextStyle(
+                                            color: sheetContext.colors.muted,
+                                            fontSize: 11,
+                                          )),
+                                    ],
+                                  ),
+                                ),
+                                Icon(Icons.logout_rounded,
+                                    color: sheetContext.colors.green, size: 20),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (selected == null || !mounted) return;
+
+    final memberId = selected['id'];
+    final memberName = selected['name'].toString();
+
     try {
       final supabase = Supabase.instance.client;
-      final now = DateTime.now();
-      final startOfDay =
-          DateTime(now.year, now.month, now.day).toIso8601String();
-
-      final checkins = await supabase
-          .from('checkins')
-          .select('member_id, type')
-          .gte('created_at', startOfDay)
-          .order('created_at', ascending: true);
-
-      final Map<String, bool> insideState = {};
-      for (final row in checkins) {
-        final mid = row['member_id']?.toString();
-        if (mid == null) continue;
-        final t = row['type'].toString().toUpperCase();
-        if (t == 'ENTRADA') insideState[mid] = true;
-        if (t == 'SALIDA') insideState.remove(mid);
-      }
-      if (insideState.isEmpty) {
-        setState(() => inside = 0);
-        return;
-      }
-      final lastInsideId = insideState.keys.last;
       await supabase.from('checkins').insert({
-        'member_id': lastInsideId,
+        'member_id': memberId,
         'type': 'SALIDA',
         'authorized': true,
         'registered_by': 'admin_manual',
       });
       await supabase.from('activities').insert({
         'type': 'SALIDA',
-        'name': 'Salida manual',
+        'name': memberName,
       });
-      await addActivity('SALIDA', 'Salida manual');
+
+      await addActivity('SALIDA', memberName);
       await loadCheckins();
       await loadActivities();
+      await loadInsidePeople();
       await _saveLocalData();
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Salida registrada correctamente')),
+        SnackBar(
+          content: Text('✅ Salida registrada para $memberName'),
+          backgroundColor: context.colors.green,
+        ),
       );
     } catch (e) {
       debugPrint('❌ Error registrando salida: $e');
+      if (!mounted) return;
+      // Fallback local
+      setState(() {
+        if (inside > 0) inside--;
+        insidePeople.removeWhere((p) => p['id'] == memberId);
+      });
+      await _saveLocalData();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('⚠️ Salida registrada solo local: $e'),
+          backgroundColor: context.colors.yellow,
+        ),
+      );
     }
   }
 
@@ -10237,8 +10806,14 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      generateGymQr();
       await _loadLocalData();
+      // ✅ FIX: solo generar QR si no hay uno válido guardado
+      final validQr = qrToken.isNotEmpty && qrExpires.isAfter(DateTime.now());
+      if (!validQr) {
+        generateGymQr();
+      } else {
+        _scheduleDailyQrRefresh();
+      }
       _capacityController.text = capacity.toString();
       if (mounted) setState(() => loadingData = false);
       _syncWithSupabase();
@@ -10248,6 +10823,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   @override
   void dispose() {
     _aforoTimer?.cancel();
+    _qrRefreshTimer?.cancel();
     searchController.dispose();
     pinController.dispose();
     clientCedulaController.dispose();
@@ -14352,6 +14928,34 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         );
       }).toList(),
     ));
+  }
+
+  Future<void> _syncQrFromCloud() async {
+    try {
+      final qrRows = await Supabase.instance.client
+          .from('gym_settings')
+          .select()
+          .inFilter('key', ['qr_token', 'qr_expires', 'qr_mode']);
+      if (qrRows.isNotEmpty) {
+        final map = {for (final r in qrRows) r['key']: r['value']};
+        final token = map['qr_token']?.toString();
+        final expiresStr = map['qr_expires']?.toString();
+        final mode = map['qr_mode']?.toString();
+        if (token != null && token.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              qrToken = token;
+              if (mode != null) qrMode = mode;
+              final exp = DateTime.tryParse(expiresStr ?? '');
+              if (exp != null) qrExpires = exp.toLocal();
+            });
+          }
+          await _saveLocalData();
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ No se pudo leer QR de Supabase: $e');
+    }
   }
 }
 
