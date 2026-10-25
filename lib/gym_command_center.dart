@@ -63,10 +63,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   List<String> clientCheckinDates = [];
   List<Map<String, dynamic>> insidePeople = [];
 
-  // --- NUEVAS VARIABLES PARA EL RESUMEN DEL DÍA ---
+  // --- RESUMEN DEL DÍA ---
   int todayEntries = 0;
   int todayExits = 0;
   int todayBlocked = 0;
+  double todayIncome = 0.0; // ✅ NUEVO: Caja del día
   List<Map<String, dynamic>> todayEntriesList = [];
   List<Map<String, dynamic>> todayExitsList = [];
   List<Map<String, dynamic>> todayBlockedList = [];
@@ -101,6 +102,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   bool loadingData = true;
   bool _qrProcessing = false;
 
+  // ✅ NUEVO: control de historial de resumen
+  DateTime summarySelectedDate = DateTime.now();
+  bool summaryViewAll = false;
+
+  // ✅ NUEVO: Variables para el aviso flotante en el Dashboard
+  Map<String, dynamic>? lastAccessAlert;
+  Timer? _alertTimer;
+
   List<Map<String, dynamic>> transactions = [];
   List<double> monthlyIncome = List<double>.filled(12, 0);
   List<double> weeklyIncome = [0, 0, 0, 0];
@@ -134,6 +143,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     'NOV',
     'DIC',
   ];
+
+  // ✅ NUEVO HELPER: Formato de hora 12h (ej: 3:38 PM)
+  String _fmtTime(DateTime d) {
+    final h = d.hour == 0 ? 12 : (d.hour > 12 ? d.hour - 12 : d.hour);
+    final m = d.minute.toString().padLeft(2, '0');
+    final ampm = d.hour >= 12 ? 'PM' : 'AM';
+    return '$h:$m $ampm';
+  }
 
   final List<Map<String, dynamic>> members = [
     {
@@ -666,6 +683,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     if (newSection == 2) {
       _startQrRefreshTimer();
       _startSummaryTimer();
+    } else if (newSection == 0) {
+      _stopQrRefreshTimer();
+      _startSummaryTimer();
+      loadCheckins(); // ✅ Refresca aforo al volver al dashboard
     } else {
       _stopQrRefreshTimer();
       _stopSummaryTimer();
@@ -679,6 +700,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       if (prev == 2) {
         _startQrRefreshTimer();
         _startSummaryTimer();
+      } else if (prev == 0) {
+        _stopQrRefreshTimer();
+        _startSummaryTimer();
+        loadCheckins(); // ✅ Refresca aforo
       } else {
         _stopQrRefreshTimer();
         _stopSummaryTimer();
@@ -686,7 +711,8 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     } else if (_section != 0) {
       setState(() => _section = 0);
       _stopQrRefreshTimer();
-      _stopSummaryTimer();
+      _startSummaryTimer();
+      loadCheckins();
     }
   }
 
@@ -705,8 +731,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   void _startSummaryTimer() {
     _summaryTimer?.cancel();
     _summaryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted && _section == 2) {
+      if (mounted && (_section == 2 || _section == 0)) {
         loadTodaySummary();
+        if (_section == 0) loadCheckins();
       }
     });
   }
@@ -1069,6 +1096,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     _aforoTimer?.cancel();
     _stopQrRefreshTimer();
     _stopSummaryTimer();
+    _alertTimer?.cancel();
     _sectionHistory.clear();
     setState(() {
       currentRole = UserRole.none;
@@ -1081,6 +1109,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       clientStreak = 0;
       clientCheckinDates = [];
       insidePeople.clear();
+      lastAccessAlert = null;
     });
     _saveLocalData();
   }
@@ -1178,11 +1207,15 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final plan = client['plan'].toString();
     final expiry = client['expiry'].toString();
     final cedula = client['cedula'].toString();
+
     final customText =
         '🔄 SOLICITUD DE RENOVACIÓN\n\n👤 Cliente: $name\n🆔 Cédula: $cedula\n📋 Plan: $plan\n📅 Vence: $expiry\n\nQuiero renovar mi membresía.';
+
     await openGymWhatsApp(clientName: name, customText: customText);
+
     final notifId =
         'renewal-${client['id']}-${DateTime.now().millisecondsSinceEpoch}';
+
     setState(() {
       renewalRequests.insert(0, {
         'id': notifId,
@@ -1195,8 +1228,22 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'read': false,
       });
     });
+
     await addActivity('RENOVACIÓN', '$name solicitó renovación');
     await _saveLocalData();
+
+    try {
+      await Supabase.instance.client.from('renewal_requests').insert({
+        'member_id': client['id'].toString(),
+        'name': name,
+        'cedula': cedula,
+        'plan': plan,
+        'expiry': expiry,
+      });
+    } catch (e) {
+      debugPrint('⚠️ Renovación guardada solo local: $e');
+    }
+
     if (!mounted) return;
     final ctx = context;
     ScaffoldMessenger.of(ctx).showSnackBar(
@@ -1301,7 +1348,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         if (sortedDays.contains(key)) {
           streak++;
         } else if (i == 0) {
-          // permite racha viva
         } else {
           break;
         }
@@ -1717,8 +1763,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           loaded.add({
             'type': row['type'] ?? '',
             'name': row['name'] ?? '',
-            'time':
-                '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}',
+            'time': _fmtTime(createdAt),
           });
         }
         if (!mounted) return;
@@ -1833,6 +1878,35 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     _syncWithSupabase();
   }
 
+  Future<void> loadRenewalRequests() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('renewal_requests')
+          .select()
+          .order('created_at', ascending: false);
+
+      if (mounted) {
+        setState(() {
+          renewalRequests = response
+              .map((r) => {
+                    'id': r['id'].toString(),
+                    'memberId': r['member_id'].toString(),
+                    'name': r['name'] ?? '',
+                    'cedula': r['cedula'] ?? '',
+                    'plan': r['plan'] ?? '',
+                    'expiry': r['expiry'] ?? '',
+                    'createdAt': r['created_at'],
+                    'read': r['read'] ?? false,
+                  })
+              .toList();
+        });
+      }
+    } catch (e) {
+      debugPrint('⚠️ Error cargando renovaciones: $e');
+    }
+  }
+
   Future<void> _syncWithSupabase() async {
     try {
       Supabase.instance.client;
@@ -1870,6 +1944,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     } catch (_) {}
     try {
       await loadActivities();
+    } catch (_) {}
+    try {
+      await loadRenewalRequests();
     } catch (_) {}
     try {
       await loadCheckins();
@@ -1910,10 +1987,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final now = DateTime.now();
     final diff = now.difference(d);
     if (diff.inHours < 24 && now.day == d.day) {
-      return 'Hoy ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+      return 'Hoy ${_fmtTime(d)}';
     }
     if (diff.inDays < 2) {
-      return 'Ayer ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+      return 'Ayer ${_fmtTime(d)}';
     }
     return '${d.day}/${d.month}/${d.year}';
   }
@@ -2011,13 +2088,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   Future<void> addActivity(String type, String name) async {
     if (!mounted) return;
     final now = DateTime.now();
-    final time =
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     setState(() {
       activities.insert(0, {
         'type': type,
         'name': name,
-        'time': time,
+        'time': _fmtTime(now),
       });
       if (activities.length > 50) activities.removeLast();
     });
@@ -2154,6 +2229,46 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return 'Expira en ${diff.inMinutes} minuto(s)';
   }
 
+  void _triggerDashboardAlert(String memberName, String status,
+      {String type = 'ENTRADA'}) {
+    Color alertColor;
+    String alertTitle;
+    IconData alertIcon;
+
+    if (type == 'SALIDA') {
+      alertColor = const Color(0xFF9C27B0); // ✅ MORADO PARA SALIDAS
+      alertTitle = 'SALIDA REGISTRADA';
+      alertIcon = Icons.logout_rounded;
+    } else if (status == 'ACTIVO') {
+      alertColor = context.colors.green;
+      alertTitle = 'ENTRADA PERMITIDA';
+      alertIcon = Icons.check_circle_rounded;
+    } else if (status == 'POR VENCER') {
+      alertColor = context.colors.yellow;
+      alertTitle = 'ENTRADA CON MEMBRESÍA POR VENCER';
+      alertIcon = Icons.warning_amber_rounded;
+    } else {
+      alertColor = context.colors.red;
+      alertTitle = 'ACCESO DENEGADO';
+      alertIcon = Icons.block_rounded;
+    }
+
+    setState(() {
+      lastAccessAlert = {
+        'name': memberName,
+        'status': status,
+        'color': alertColor,
+        'title': alertTitle,
+        'icon': alertIcon,
+      };
+    });
+
+    _alertTimer?.cancel();
+    _alertTimer = Timer(const Duration(seconds: 6), () {
+      if (mounted) setState(() => lastAccessAlert = null);
+    });
+  }
+
   Future<void> _processGymQrScan(String scannedCode) async {
     if (_qrProcessing) return;
     if (loggedClient == null) return;
@@ -2164,7 +2279,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     final status = client['status'].toString().toUpperCase();
 
     try {
-      // 1. Validar prefijo
       if (!scannedCode.startsWith('SYNTH-GYM-')) {
         await _showAccessOverlay(
           success: false,
@@ -2176,7 +2290,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         return;
       }
 
-      // 2. Validar expiración (solo si no es FIJO)
       if (qrMode != 'FIJO' && DateTime.now().isAfter(qrExpires)) {
         await _showAccessOverlay(
           success: false,
@@ -2188,7 +2301,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         return;
       }
 
-      // 3. Validar que el token escaneado sea el actual
       if (qrToken.isNotEmpty && scannedCode != qrToken) {
         await _showAccessOverlay(
           success: false,
@@ -2200,10 +2312,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         return;
       }
 
-      // 4. Registrar entrada/salida
-      String type = 'ENTRADA';
       final supabase = Supabase.instance.client;
-
       final now = DateTime.now();
       final startOfLocalDay = DateTime(now.year, now.month, now.day);
       final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
@@ -2218,8 +2327,31 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       final lastType = todayCheckins.isNotEmpty
           ? todayCheckins.last['type'].toString().toUpperCase()
           : '';
-      type = lastType == 'ENTRADA' ? 'SALIDA' : 'ENTRADA';
 
+      // ✅ VALIDACIÓN: Si ya entró, no lo dejamos marcar otra vez
+      if (lastType == 'ENTRADA') {
+        await _showAccessOverlay(
+          success: false,
+          title: 'YA ESTÁS DENTRO',
+          subtitle: 'Ya registraste tu entrada hoy. Disfruta tu entrenamiento.',
+          name: memberName,
+          status: 'DENTRO',
+        );
+        return;
+      }
+      // Si ya salió, tampoco lo dejamos entrar de nuevo
+      else if (lastType == 'SALIDA') {
+        await _showAccessOverlay(
+          success: false,
+          title: 'YA SALISTE HOY',
+          subtitle: 'Ya registraste tu salida por hoy. Nos vemos mañana.',
+          name: memberName,
+          status: 'SALIDA',
+        );
+        return;
+      }
+
+      String type = 'ENTRADA';
       final isBlocked = status != 'ACTIVO';
 
       await supabase.from('checkins').insert({
@@ -2228,11 +2360,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         'authorized': !isBlocked,
         'reason': isBlocked ? 'Membresía $status' : null,
         'registered_by': 'client_qr',
-      });
-
-      await supabase.from('activities').insert({
-        'type': isBlocked ? 'BLOQUEADO' : type,
-        'name': memberName,
       });
 
       if (type == 'ENTRADA' && !isBlocked) {
@@ -2245,39 +2372,35 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           setState(() {
             loggedClient!['attendance'] = attendance + 1;
             loggedClient!['lastVisit'] = _formatDate(DateTime.now());
-            inside++;
-            clientInsideCount++;
           });
           await loadClientStreak();
-        }
-      } else if (type == 'SALIDA') {
-        if (mounted) {
-          setState(() {
-            if (clientInsideCount > 0) clientInsideCount--;
-            if (inside > 0) inside--;
-          });
         }
       }
 
       if (mounted) addActivity(isBlocked ? 'BLOQUEADO' : type, memberName);
+
       await loadActivities();
       await loadCheckins();
       await loadClientAforo();
       await _saveLocalData();
 
       if (!mounted) return;
-      await _showAccessOverlay(
-        success: !isBlocked,
-        title: isBlocked ? 'ACCESO DENEGADO' : 'ACCESO PERMITIDO',
-        subtitle: isBlocked
-            ? 'Membresía $status. Contacta al gym.'
-            : type == 'ENTRADA'
-                ? '¡Bienvenido al gimnasio!'
-                : '¡Hasta pronto!',
-        name: memberName,
-        status: status,
-        type: type,
-      );
+      if (mounted) setState(() {});
+
+      _triggerDashboardAlert(memberName, status, type: type);
+
+      if (type == 'ENTRADA') {
+        await _showAccessOverlay(
+          success: !isBlocked,
+          title: isBlocked ? 'ACCESO DENEGADO' : 'BIENVENIDO',
+          subtitle: isBlocked
+              ? 'Membresía $status. Contacta al gym.'
+              : '¡Que tengas un excelente entrenamiento!',
+          name: memberName,
+          status: status,
+          type: type,
+        );
+      }
     } catch (e) {
       debugPrint('❌ Error procesando QR: $e');
       if (mounted) {
@@ -2357,7 +2480,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: color,
-                          fontSize: 24,
+                          fontSize: 28,
                           fontWeight: FontWeight.w900,
                           letterSpacing: 2,
                         ),
@@ -2379,7 +2502,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                               textAlign: TextAlign.center,
                               style: TextStyle(
                                 color: dialogContext.colors.white,
-                                fontSize: 20,
+                                fontSize: 22,
                                 fontWeight: FontWeight.w900,
                                 letterSpacing: 1.5,
                               ),
@@ -2416,23 +2539,21 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                             ),
                             const SizedBox(height: 14),
                             Text(
-                              '${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+                              _fmtTime(DateTime.now()),
                               style: TextStyle(
                                 color: dialogContext.colors.white,
-                                fontSize: 28,
+                                fontSize: 32,
                                 fontWeight: FontWeight.w900,
                                 letterSpacing: 2,
                               ),
                             ),
-                            if (type != null) ...[
+                            if (type != null && type == 'ENTRADA') ...[
                               const SizedBox(height: 8),
                               Text(
-                                type == 'ENTRADA'
-                                    ? '↑ ENTRADA REGISTRADA'
-                                    : '↓ SALIDA REGISTRADA',
+                                '↑ ENTRADA REGISTRADA',
                                 style: TextStyle(
                                   color: dialogContext.colors.muted,
-                                  fontSize: 11,
+                                  fontSize: 12,
                                   fontWeight: FontWeight.w800,
                                   letterSpacing: 1.5,
                                 ),
@@ -2602,7 +2723,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     try {
       final supabase = Supabase.instance.client;
 
-      // ✅ FILTRO POR DÍA LOCAL → UTC
       final now = DateTime.now();
       final startOfLocalDay = DateTime(now.year, now.month, now.day);
       final endOfLocalDay = startOfLocalDay.add(const Duration(days: 1));
@@ -2613,7 +2733,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       debugPrint(
           '🗑️ Borrando aforo desde: $startOfDayUtc hasta: $endOfDayUtc');
 
-      // Borrar SOLO check-ins de HOY (aforo)
       await supabase
           .from('checkins')
           .delete()
@@ -2622,7 +2741,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       debugPrint('✅ Aforo borrado en Supabase completado');
 
-      // Reset local de aforo y resumen
       setState(() {
         inside = 0;
         clientInsideCount = 0;
@@ -2637,7 +2755,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       await _saveLocalData();
 
-      // Recargar aforo para confirmar
       await loadCheckins();
       await loadInsidePeople();
       await loadTodaySummary();
@@ -2669,18 +2786,24 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
   Future<void> showResetDayDialog() => resetAforo();
 
-  Future<void> loadTodaySummary() async {
+  Future<void> loadTodaySummary({DateTime? forDate}) async {
     try {
       final supabase = Supabase.instance.client;
-      final now = DateTime.now();
-      final startOfLocalDay = DateTime(now.year, now.month, now.day);
+      final targetDate = forDate ?? DateTime.now();
+
+      final startOfLocalDay =
+          DateTime(targetDate.year, targetDate.month, targetDate.day);
+      final endOfLocalDay = startOfLocalDay.add(const Duration(days: 1));
+
       final startOfDayUtc = startOfLocalDay.toUtc().toIso8601String();
+      final endOfDayUtc = endOfLocalDay.toUtc().toIso8601String();
 
       final response = await supabase
           .from('checkins')
           .select(
               'member_id, type, authorized, reason, created_at, members(name, plan, phone)')
           .gte('created_at', startOfDayUtc)
+          .lt('created_at', endOfDayUtc)
           .order('created_at', ascending: false);
 
       final List<Map<String, dynamic>> entries = [];
@@ -2701,16 +2824,15 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         final plan = memberData != null ? (memberData['plan'] ?? '—') : '—';
         final phone = memberData != null ? (memberData['phone'] ?? '') : '';
         final createdAt =
-            DateTime.tryParse(row['created_at'].toString())?.toLocal() ?? now;
-        final timeStr =
-            '${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}';
+            DateTime.tryParse(row['created_at'].toString())?.toLocal() ??
+                DateTime.now();
 
         final item = {
           'id': mid,
           'name': name,
           'plan': plan,
           'phone': phone,
-          'time': timeStr,
+          'time': _fmtTime(createdAt),
           'timestamp': createdAt,
           'reason': reason,
         };
@@ -2726,6 +2848,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
 
       if (mounted) {
         setState(() {
+          summarySelectedDate = targetDate;
           todayEntriesList = entries;
           todayExitsList = exits;
           todayBlockedList = blocked;
@@ -2733,6 +2856,19 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           todayEntries = entries.length;
           todayExits = exits.length;
           todayBlocked = blocked.length;
+
+          // ✅ CALCULAR CAJA DE HOY
+          todayIncome = 0.0;
+          for (var tx in transactions) {
+            final txDate = tx['created_at'] as DateTime?;
+            if (txDate != null &&
+                txDate.year == targetDate.year &&
+                txDate.month == targetDate.month &&
+                txDate.day == targetDate.day &&
+                tx['type'] == 'INGRESO') {
+              todayIncome += (tx['amount'] as num).toDouble();
+            }
+          }
         });
       }
     } catch (e) {
@@ -2740,8 +2876,33 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     }
   }
 
+  Future<void> _pickHistoryDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: summarySelectedDate,
+      firstDate: DateTime.now().subtract(const Duration(days: 365)),
+      lastDate: DateTime.now(),
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: ColorScheme.dark(
+              primary: context.colors.red,
+              onPrimary: Colors.white,
+              surface: context.colors.panel,
+              onSurface: context.colors.white,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+    if (picked != null) {
+      await loadTodaySummary(forDate: picked);
+    }
+  }
+
   Future<void> _showTodayStatSheet({required String type}) async {
-    await loadTodaySummary();
+    await loadTodaySummary(forDate: summarySelectedDate);
     if (!mounted) return;
 
     List<Map<String, dynamic>> dataList;
@@ -2756,23 +2917,28 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       color = context.colors.green;
     } else if (type == 'ENTRADAS') {
       dataList = todayEntriesList;
-      title = 'ENTRADAS HOY';
+      title = 'ENTRADAS';
       icon = Icons.login_rounded;
       color = context.colors.blue;
     } else if (type == 'SALIDAS') {
       dataList = todayExitsList;
-      title = 'SALIDAS HOY';
+      title = 'SALIDAS';
       icon = Icons.logout_rounded;
       color = context.colors.yellow;
     } else {
       dataList = todayBlockedList;
-      title = 'BLOQUEADOS HOY';
+      title = 'BLOQUEADOS';
       icon = Icons.block_rounded;
       color = context.colors.red;
     }
 
-    final String today =
-        'HOY · ${DateTime.now().day} ${_monthName(DateTime.now().month)} ${DateTime.now().year}';
+    final isToday = summarySelectedDate.year == DateTime.now().year &&
+        summarySelectedDate.month == DateTime.now().month &&
+        summarySelectedDate.day == DateTime.now().day;
+
+    final dateLabel = isToday
+        ? 'HOY · ${summarySelectedDate.day} ${_monthName(summarySelectedDate.month)}'
+        : '${summarySelectedDate.day} ${_monthName(summarySelectedDate.month)} ${summarySelectedDate.year}';
 
     showModalBottomSheet(
       context: context,
@@ -2827,7 +2993,8 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                                     letterSpacing: 1,
                                   )),
                               const SizedBox(height: 2),
-                              Text('$today · ${dataList.length} registro(s)',
+                              Text(
+                                  '$dateLabel · ${dataList.length} registro(s)',
                                   style: TextStyle(
                                     color: sheetContext.colors.muted,
                                     fontSize: 11,
@@ -2835,10 +3002,28 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                             ],
                           ),
                         ),
+                        if (type != 'DENTRO')
+                          IconButton(
+                            tooltip: 'Ver historial',
+                            onPressed: () async {
+                              await _pickHistoryDate();
+                              setModalState(() {
+                                if (type == 'ENTRADAS')
+                                  dataList = todayEntriesList;
+                                if (type == 'SALIDAS')
+                                  dataList = todayExitsList;
+                                if (type == 'BLOQUEADOS')
+                                  dataList = todayBlockedList;
+                              });
+                            },
+                            icon: Icon(Icons.calendar_month_rounded,
+                                color: sheetContext.colors.white, size: 20),
+                          ),
                         IconButton(
                           onPressed: () async {
-                            await loadTodaySummary();
-                            await loadInsidePeople();
+                            await loadTodaySummary(
+                                forDate: summarySelectedDate);
+                            if (type == 'DENTRO') await loadInsidePeople();
                             setModalState(() {
                               if (type == 'DENTRO') dataList = insidePeople;
                               if (type == 'ENTRADAS')
@@ -2875,14 +3060,14 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                                         color: sheetContext.colors.muted,
                                         size: 48),
                                     const SizedBox(height: 12),
-                                    Text('Sin registros por ahora',
+                                    Text('Sin registros',
                                         style: TextStyle(
                                           color: sheetContext.colors.white,
                                           fontSize: 14,
                                           fontWeight: FontWeight.w800,
                                         )),
                                     const SizedBox(height: 4),
-                                    Text('No hay movimientos de este tipo hoy',
+                                    Text('No hay movimientos de este tipo',
                                         style: TextStyle(
                                           color: sheetContext.colors.muted,
                                           fontSize: 11,
@@ -3677,6 +3862,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       };
                       transactions.insert(0, newTx);
                       income += value;
+                      todayIncome += value; // ✅ Suma a la caja de hoy
                     });
 
                     if (memberData['id'] != null) {
@@ -6150,27 +6336,69 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ),
           ),
           actions: [
-            IconButton(
-              tooltip: 'Aforo en vivo',
-              icon: Icon(Icons.people_alt_rounded, color: context.colors.green),
-              onPressed: showInsidePeople,
-            ),
-            IconButton(
-              tooltip: 'Resumen del día',
-              icon: Icon(Icons.insights_rounded, color: context.colors.blue),
-              onPressed: showDaySummary,
-            ),
-            if (_section != 0)
-              IconButton(
-                tooltip: 'Inicio',
-                icon: Icon(Icons.home_rounded, color: context.colors.red),
-                onPressed: () {
+            // ✅ MENÚ DE TRES PUNTOS PARA MÓVIL
+            PopupMenuButton<String>(
+              icon: Icon(Icons.more_vert_rounded, color: context.colors.white),
+              color: context.colors.panel2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: BorderSide(color: context.colors.border),
+              ),
+              onSelected: (value) {
+                if (value == 'member') addMember();
+                if (value == 'payment') newPayment();
+                if (value == 'scan') showAccessScanner();
+                if (value == 'exit') registerExit();
+                if (value == 'notifications') showNotifications();
+                if (value == 'summary') showDaySummary();
+                if (value == 'inside') showInsidePeople();
+                if (value == 'home') {
                   _sectionHistory.clear();
                   setState(() => _section = 0);
                   _stopQrRefreshTimer();
-                  _stopSummaryTimer();
-                },
+                  _startSummaryTimer();
+                }
+              },
+              itemBuilder: (context) => [
+                _popupItem('AGREGAR MIEMBRO', Icons.person_add_alt_1_rounded,
+                    context.colors.red, 'member'),
+                _popupItem('NUEVO PAGO', Icons.payments_rounded,
+                    context.colors.green, 'payment'),
+                _popupItem('ESCANEAR QR', Icons.qr_code_scanner_rounded,
+                    context.colors.blue, 'scan'),
+                _popupItem('SALIDA RÁPIDA', Icons.logout_rounded,
+                    const Color(0xFF9C27B0), 'exit'),
+                const PopupMenuDivider(),
+                _popupItem('Aforo en vivo', Icons.people_alt_rounded,
+                    context.colors.green, 'inside'),
+                _popupItem('Resumen del día', Icons.insights_rounded,
+                    context.colors.blue, 'summary'),
+                _popupItem('Notificaciones', Icons.notifications_active_rounded,
+                    context.colors.red, 'notifications'),
+                if (_section != 0)
+                  _popupItem(
+                      'Inicio', Icons.home_rounded, context.colors.red, 'home'),
+              ],
+            ),
+            // Avatar del admin
+            Padding(
+              padding: const EdgeInsets.only(right: 16, left: 8),
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: context.colors.red.withValues(alpha: .15),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: context.colors.red, width: 1.5),
+                ),
+                child: Center(
+                  child: Text('A',
+                      style: TextStyle(
+                          color: context.colors.red,
+                          fontWeight: FontWeight.w900)),
+                ),
               ),
+            ),
           ],
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(1),
@@ -6181,6 +6409,31 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
             ? Center(
                 child: CircularProgressIndicator(color: context.colors.red))
             : _content(),
+      ),
+    );
+  }
+
+  PopupMenuItem<String> _popupItem(
+      String text, IconData icon, Color color, String value) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .15),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: color, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Text(text,
+              style: TextStyle(
+                  color: context.colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 12)),
+        ],
       ),
     );
   }
@@ -6542,316 +6795,110 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       final expiredCount = members
           .where((m) => m['status'].toString().toUpperCase() == 'VENCIDO')
           .length;
-      return AdminHomeMobile(
-        inside: inside,
-        capacity: capacity,
-        income: totalIncome,
-        activeMembers: activeCount,
-        expiringSoon: expiringCount,
-        expired: expiredCount,
-        activities: activities,
-        notificationCount: ac,
-        adminName: 'SYNTHETIX',
-        onScan: showAccessScanner,
-        onNewPayment: newPayment,
-        onNewMember: addMember,
-        onOpenNotifications: showNotifications,
-        onOpenMore: () => _goToSection(6),
-        onOpenMemberships: () => _goToSection(3),
-        onOpenClients: () => _goToSection(1),
-        onOpenFinance: () => _goToSection(4),
-      );
-    }
-    return _dashboardContent();
-  }
 
-  void showNotifications() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetContext) {
-        return StatefulBuilder(
-          builder: (sheetContext, setModalState) {
-            final alerts = activeAlerts(sheetContext);
-            final renewals =
-                renewalRequests.where((r) => r['read'] != true).toList();
-            return Container(
-              margin: EdgeInsets.only(
-                  top: MediaQuery.of(sheetContext).padding.top + 40),
-              decoration: BoxDecoration(
-                color: sheetContext.colors.bg,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(28)),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    margin: const EdgeInsets.only(top: 12),
-                    width: 40,
-                    height: 4,
+      return Stack(
+        children: [
+          AdminHomeMobile(
+            inside: inside,
+            capacity: capacity,
+            income: totalIncome,
+            activeMembers: activeCount,
+            expiringSoon: expiringCount,
+            expired: expiredCount,
+            activities: activities,
+            notificationCount: ac,
+            adminName: 'SYNTHETIX',
+            onScan: showAccessScanner,
+            onNewPayment: newPayment,
+            onNewMember: addMember,
+            onOpenNotifications: showNotifications,
+            onOpenMore: () => _goToSection(6),
+            onOpenMemberships: () => _goToSection(3),
+            onOpenClients: () => _goToSection(1),
+            onOpenFinance: () => _goToSection(4),
+          ),
+          if (lastAccessAlert != null)
+            Positioned(
+              top: 20,
+              left: 20,
+              right: 20,
+              child: TweenAnimationBuilder<double>(
+                duration: const Duration(milliseconds: 400),
+                curve: Curves.easeOutBack,
+                tween: Tween(begin: -100, end: 0),
+                builder: (context, value, child) {
+                  return Transform.translate(
+                    offset: Offset(0, value),
+                    child: child,
+                  );
+                },
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 16),
                     decoration: BoxDecoration(
-                      color: sheetContext.colors.muted.withValues(alpha: .4),
-                      borderRadius: BorderRadius.circular(2),
+                      color: (lastAccessAlert!['color'] as Color)
+                          .withValues(alpha: .95),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: (lastAccessAlert!['color'] as Color)
+                              .withValues(alpha: .4),
+                          blurRadius: 20,
+                          offset: const Offset(0, 8),
+                        ),
+                      ],
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
                     child: Row(
                       children: [
-                        Container(
-                          width: 42,
-                          height: 42,
-                          decoration: BoxDecoration(
-                            color:
-                                sheetContext.colors.red.withValues(alpha: .12),
-                            borderRadius: BorderRadius.circular(13),
-                          ),
-                          child: Icon(
-                            Icons.notifications_active_rounded,
-                            color: sheetContext.colors.red,
-                            size: 20,
-                          ),
+                        Icon(
+                          lastAccessAlert!['icon'] as IconData,
+                          color: Colors.white,
+                          size: 32,
                         ),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: 16),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Notificaciones',
-                                  style: TextStyle(
-                                    color: sheetContext.colors.white,
-                                    fontSize: 17,
-                                    fontWeight: FontWeight.w900,
-                                  )),
-                              const SizedBox(height: 2),
                               Text(
-                                (alerts.length + renewals.length) == 0
-                                    ? 'Todo en orden'
-                                    : '${alerts.length + renewals.length} pendientes',
-                                style: TextStyle(
-                                  color: sheetContext.colors.muted,
-                                  fontSize: 11,
+                                lastAccessAlert!['title'] as String,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                lastAccessAlert!['name'] as String,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w900,
                                 ),
                               ),
                             ],
                           ),
                         ),
                         IconButton(
-                          onPressed: () => Navigator.pop(sheetContext),
-                          icon: Icon(Icons.close_rounded,
-                              color: sheetContext.colors.muted, size: 22),
+                          onPressed: () =>
+                              setState(() => lastAccessAlert = null),
+                          icon: const Icon(Icons.close_rounded,
+                              color: Colors.white),
                         ),
                       ],
                     ),
                   ),
-                  Flexible(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight:
-                            MediaQuery.of(sheetContext).size.height * 0.65,
-                      ),
-                      child: (alerts.isEmpty && renewals.isEmpty)
-                          ? Padding(
-                              padding: const EdgeInsets.all(40),
-                              child: Center(
-                                child: Column(
-                                  children: [
-                                    Icon(Icons.check_circle_rounded,
-                                        color: sheetContext.colors.green,
-                                        size: 50),
-                                    const SizedBox(height: 14),
-                                    Text('Sin notificaciones',
-                                        style: TextStyle(
-                                          color: sheetContext.colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w900,
-                                        )),
-                                    const SizedBox(height: 6),
-                                    Text('Todo está al día',
-                                        style: TextStyle(
-                                          color: sheetContext.colors.muted,
-                                          fontSize: 12,
-                                        )),
-                                  ],
-                                ),
-                              ),
-                            )
-                          : ListView(
-                              shrinkWrap: true,
-                              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                              children: [
-                                ...renewals.map((r) => Container(
-                                      margin: const EdgeInsets.only(bottom: 10),
-                                      padding: const EdgeInsets.all(14),
-                                      decoration: BoxDecoration(
-                                        color: sheetContext.colors.panel,
-                                        borderRadius: BorderRadius.circular(16),
-                                        border: Border.all(
-                                          color: sheetContext.colors.yellow
-                                              .withValues(alpha: .40),
-                                        ),
-                                      ),
-                                      child: Row(children: [
-                                        Container(
-                                          width: 42,
-                                          height: 42,
-                                          decoration: BoxDecoration(
-                                            color: sheetContext.colors.yellow
-                                                .withValues(alpha: .12),
-                                            borderRadius:
-                                                BorderRadius.circular(12),
-                                          ),
-                                          child: Icon(Icons.autorenew_rounded,
-                                              color: sheetContext.colors.yellow,
-                                              size: 20),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(r['name'].toString(),
-                                                  style: TextStyle(
-                                                    color: sheetContext
-                                                        .colors.white,
-                                                    fontSize: 13,
-                                                    fontWeight: FontWeight.w800,
-                                                  )),
-                                              const SizedBox(height: 3),
-                                              Text(
-                                                  'Solicitó renovación · ${r['plan']}',
-                                                  style: TextStyle(
-                                                    color: sheetContext
-                                                        .colors.muted,
-                                                    fontSize: 11,
-                                                  )),
-                                            ],
-                                          ),
-                                        ),
-                                        IconButton(
-                                          onPressed: () {
-                                            setState(() {
-                                              r['read'] = true;
-                                            });
-                                            _saveLocalData();
-                                            setModalState(() {});
-                                          },
-                                          icon: Icon(Icons.close_rounded,
-                                              color: sheetContext.colors.muted,
-                                              size: 18),
-                                        ),
-                                      ]),
-                                    )),
-                                ...alerts.map((alert) {
-                                  final color = alert['color'] as Color;
-                                  final icon = alert['icon'] as IconData;
-                                  return Container(
-                                    margin: const EdgeInsets.only(bottom: 10),
-                                    padding: const EdgeInsets.all(14),
-                                    decoration: BoxDecoration(
-                                      color: sheetContext.colors.panel,
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                          color: color.withValues(alpha: .25)),
-                                    ),
-                                    child: Row(children: [
-                                      Container(
-                                        width: 42,
-                                        height: 42,
-                                        decoration: BoxDecoration(
-                                          color: color.withValues(alpha: .12),
-                                          borderRadius:
-                                              BorderRadius.circular(12),
-                                        ),
-                                        child:
-                                            Icon(icon, color: color, size: 20),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(alert['title'].toString(),
-                                                style: TextStyle(
-                                                  color:
-                                                      sheetContext.colors.white,
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w800,
-                                                ),
-                                                maxLines: 1,
-                                                overflow:
-                                                    TextOverflow.ellipsis),
-                                            const SizedBox(height: 3),
-                                            Text(alert['subtitle'].toString(),
-                                                style: TextStyle(
-                                                  color:
-                                                      sheetContext.colors.muted,
-                                                  fontSize: 11,
-                                                ),
-                                                maxLines: 1,
-                                                overflow:
-                                                    TextOverflow.ellipsis),
-                                          ],
-                                        ),
-                                      ),
-                                      IconButton(
-                                        onPressed: () {
-                                          dismissAlert(alert['id'].toString());
-                                          setModalState(() {});
-                                        },
-                                        icon: Icon(Icons.close_rounded,
-                                            color: sheetContext.colors.muted,
-                                            size: 18),
-                                      ),
-                                    ]),
-                                  );
-                                }),
-                              ],
-                            ),
-                    ),
-                  ),
-                  if (alerts.isNotEmpty || renewals.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-                      child: SizedBox(
-                        width: double.infinity,
-                        height: 48,
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            Navigator.pop(sheetContext);
-                            _goToSection(6);
-                          },
-                          icon: const Icon(Icons.list_rounded, size: 18),
-                          label: const Text(
-                            'VER TODAS LAS ALERTAS',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: 12,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: sheetContext.colors.red,
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
+                ),
               ),
-            );
-          },
-        );
-      },
-    );
+            ),
+        ],
+      );
+    }
+    return _dashboardContent();
   }
 
   Widget _dashboardContent() {
@@ -6860,82 +6907,174 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         final compacto = constraints.maxWidth < 900;
         final espacio = compacto ? 16.0 : 28.0;
 
-        final acciones = [
-          _quickAction(
-            Icons.person_add_alt_1_rounded,
-            'AGREGAR MIEMBRO',
-            context.colors.red,
-            addMember,
-          ),
-          _quickAction(
-            Icons.payments_rounded,
-            'NUEVO PAGO',
-            context.colors.green,
-            newPayment,
-            darkText: true,
-          ),
-          _quickAction(
-            Icons.qr_code_scanner_rounded,
-            'ESCANEAR ACCESO',
-            context.colors.blue,
-            showAccessScanner,
-          ),
-        ];
-
-        return SingleChildScrollView(
-          padding: EdgeInsets.all(espacio),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _hero(),
-              SizedBox(height: espacio * 0.8),
-              if (compacto)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (var i = 0; i < acciones.length; i++) ...[
-                      if (i > 0) const SizedBox(height: 10),
-                      SizedBox(
-                        width: double.infinity,
-                        child: acciones[i],
+        return Stack(
+          children: [
+            SingleChildScrollView(
+              padding: EdgeInsets.all(espacio),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // ✅ NUEVO: Fila con el Título y el Menú de 3 Puntos
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'DASHBOARD',
+                        style: TextStyle(
+                          color: context.colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                      // MENÚ DE TRES PUNTOS PARA WEB
+                      Container(
+                        decoration: BoxDecoration(
+                          color: context.colors.panel,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: context.colors.border),
+                        ),
+                        child: PopupMenuButton<String>(
+                          icon: Icon(Icons.more_vert_rounded,
+                              color: context.colors.white),
+                          color: context.colors.panel2,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            side: BorderSide(color: context.colors.border),
+                          ),
+                          onSelected: (value) {
+                            if (value == 'member') addMember();
+                            if (value == 'payment') newPayment();
+                            if (value == 'scan') showAccessScanner();
+                            if (value == 'exit') registerExit();
+                          },
+                          itemBuilder: (context) => [
+                            _popupItem(
+                                'AGREGAR MIEMBRO',
+                                Icons.person_add_alt_1_rounded,
+                                context.colors.red,
+                                'member'),
+                            _popupItem('NUEVO PAGO', Icons.payments_rounded,
+                                context.colors.green, 'payment'),
+                            _popupItem(
+                                'ESCANEAR QR',
+                                Icons.qr_code_scanner_rounded,
+                                context.colors.blue,
+                                'scan'),
+                            _popupItem('SALIDA RÁPIDA', Icons.logout_rounded,
+                                const Color(0xFF9C27B0), 'exit'),
+                          ],
+                        ),
                       ),
                     ],
-                  ],
-                )
-              else
-                Row(
-                  children: [
-                    for (var i = 0; i < acciones.length; i++) ...[
-                      if (i > 0) const SizedBox(width: 14),
-                      Expanded(child: acciones[i]),
-                    ],
-                  ],
+                  ),
+                  SizedBox(height: espacio * 0.8),
+                  _hero(),
+                  SizedBox(height: espacio * 0.85),
+                  _metrics(),
+                  SizedBox(height: espacio * 0.85),
+                  if (compacto)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _activityCard(),
+                        const SizedBox(height: 16),
+                        _plansCard(),
+                      ],
+                    )
+                  else
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(flex: 3, child: _activityCard()),
+                        const SizedBox(width: 18),
+                        Expanded(flex: 2, child: _plansCard()),
+                      ],
+                    ),
+                  SizedBox(height: espacio * 0.85),
+                  _membersCard(),
+                ],
+              ),
+            ),
+            if (lastAccessAlert != null)
+              Positioned(
+                top: 20,
+                left: 20,
+                right: 20,
+                child: TweenAnimationBuilder<double>(
+                  duration: const Duration(milliseconds: 400),
+                  curve: Curves.easeOutBack,
+                  tween: Tween(begin: -100, end: 0),
+                  builder: (context, value, child) {
+                    return Transform.translate(
+                      offset: Offset(0, value),
+                      child: child,
+                    );
+                  },
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 16),
+                      decoration: BoxDecoration(
+                        color: (lastAccessAlert!['color'] as Color)
+                            .withValues(alpha: .95),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (lastAccessAlert!['color'] as Color)
+                                .withValues(alpha: .4),
+                            blurRadius: 20,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            lastAccessAlert!['icon'] as IconData,
+                            color: Colors.white,
+                            size: 32,
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  lastAccessAlert!['title'] as String,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  lastAccessAlert!['name'] as String,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () =>
+                                setState(() => lastAccessAlert = null),
+                            icon: const Icon(Icons.close_rounded,
+                                color: Colors.white),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-              SizedBox(height: espacio * 0.85),
-              _metrics(),
-              SizedBox(height: espacio * 0.85),
-              if (compacto)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _activityCard(),
-                    const SizedBox(height: 16),
-                    _plansCard(),
-                  ],
-                )
-              else
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 3, child: _activityCard()),
-                    const SizedBox(width: 18),
-                    Expanded(flex: 2, child: _plansCard()),
-                  ],
-                ),
-              SizedBox(height: espacio * 0.85),
-              _membersCard(),
-            ],
-          ),
+              ),
+          ],
         );
       },
     );
@@ -6989,6 +7128,46 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                     const SizedBox(width: 10),
                     _statusChip('OPERATIVO', context.colors.green),
                   ],
+                ),
+                const SizedBox(height: 16),
+                // ✅ NUEVO: CAJA DE HOY
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: context.colors.panel2,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: context.colors.green.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.account_balance_wallet_rounded,
+                          color: context.colors.green, size: 20),
+                      const SizedBox(width: 10),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'CAJA DE HOY',
+                            style: TextStyle(
+                                color: context.colors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1),
+                          ),
+                          Text(
+                            formatPrice(todayIncome),
+                            style: TextStyle(
+                                color: context.colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -7584,8 +7763,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                                 final entry = p['entryTime'] as DateTime;
                                 final mins =
                                     DateTime.now().difference(entry).inMinutes;
-                                final timeStr =
-                                    '${entry.hour.toString().padLeft(2, '0')}:${entry.minute.toString().padLeft(2, '0')}';
+                                final timeStr = _fmtTime(entry);
                                 final name = p['name'].toString();
                                 final initial =
                                     name.isEmpty ? '?' : name[0].toUpperCase();
@@ -7677,14 +7855,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   void showDaySummary() {
-    final entries = activities.where((a) => a['type'] == 'ENTRADA').length;
-    final exits = activities.where((a) => a['type'] == 'SALIDA').length;
-    final blocked = activities.where((a) => a['type'] == 'BLOQUEADO').length;
-    final active = members.where((m) => m['status'] == 'ACTIVO').length;
-    final expiring = members.where((m) => m['status'] == 'POR VENCER').length;
-    final expired = members.where((m) => m['status'] == 'VENCIDO').length;
-    final pending = members.where((m) => m['status'] == 'PENDIENTE').length;
-
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -7759,7 +7929,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.login_rounded,
                       color: sheetContext.colors.green,
-                      value: '$entries',
+                      value: '$todayEntries',
                       label: 'Entradas',
                     ),
                   ),
@@ -7769,7 +7939,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.logout_rounded,
                       color: sheetContext.colors.yellow,
-                      value: '$exits',
+                      value: '$todayExits',
                       label: 'Salidas',
                     ),
                   ),
@@ -7779,7 +7949,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.block_rounded,
                       color: sheetContext.colors.red,
-                      value: '$blocked',
+                      value: '$todayBlocked',
                       label: 'Bloqueados',
                     ),
                   ),
@@ -7791,7 +7961,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.people_alt_rounded,
                       color: sheetContext.colors.blue,
-                      value: '$active',
+                      value:
+                          '${members.where((m) => m['status'] == 'ACTIVO').length}',
                       label: 'Activos',
                     ),
                   ),
@@ -7801,7 +7972,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.warning_amber_rounded,
                       color: sheetContext.colors.yellow,
-                      value: '$expiring',
+                      value:
+                          '${members.where((m) => m['status'] == 'POR VENCER').length}',
                       label: 'Por vencer',
                     ),
                   ),
@@ -7811,7 +7983,8 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       sheetContext,
                       icon: Icons.error_rounded,
                       color: sheetContext.colors.red,
-                      value: '$expired',
+                      value:
+                          '${members.where((m) => m['status'] == 'VENCIDO').length}',
                       label: 'Vencidos',
                     ),
                   ),
@@ -7835,13 +8008,13 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                 _summaryRow(
                   sheetContext,
                   'Miembros activos',
-                  '$active',
+                  '${members.where((m) => m['status'] == 'ACTIVO').length}',
                   sheetContext.colors.green,
                 ),
                 _summaryRow(
                   sheetContext,
                   'Pendientes de aprobación',
-                  '$pending',
+                  '${members.where((m) => m['status'] == 'PENDIENTE').length}',
                   sheetContext.colors.red,
                 ),
                 _summaryRow(
@@ -9243,7 +9416,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                         const SizedBox(height: 8),
                         _infoRow(
                           'Generado',
-                          '${qrGenerated.hour.toString().padLeft(2, '0')}:${qrGenerated.minute.toString().padLeft(2, '0')}',
+                          _fmtTime(qrGenerated),
                         ),
                         const SizedBox(height: 8),
                         _infoRow(
@@ -11098,7 +11271,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       builder: (_) => _ClientProfilePage(
         member: member,
         formatPrice: formatPrice,
-        onEdit: () => editMember(member),
+        onEdit: () => newPayment(),
         onDelete: () => deleteMember(member),
         transactions: transactions,
         onWhatsApp: () =>
@@ -11108,53 +11281,153 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
   }
 
   void showActivity() {
+    DateTime selectedDate = DateTime.now();
+    bool isLoading = false;
+    List<Map<String, dynamic>> filteredLogs = [];
+
     showDialog(
       context: context,
       builder: (dialogContext) {
-        return _dialog(
-          title: 'ACTIVIDAD RECIENTE',
-          child: SizedBox(
-            width: 560,
-            child: ListView(
-              shrinkWrap: true,
-              children: activities.isEmpty
-                  ? [
-                      Padding(
-                        padding: const EdgeInsets.all(30),
-                        child: Center(
-                          child: Text('Sin actividad reciente',
-                              style:
-                                  TextStyle(color: dialogContext.colors.muted)),
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> loadLogsForDate(DateTime date) async {
+              setDialogState(() => isLoading = true);
+              try {
+                final startOfDay = DateTime(date.year, date.month, date.day)
+                    .toUtc()
+                    .toIso8601String();
+                final endOfDay = DateTime(date.year, date.month, date.day + 1)
+                    .toUtc()
+                    .toIso8601String();
+
+                final supabase = Supabase.instance.client;
+                final res = await supabase
+                    .from('activities')
+                    .select()
+                    .gte('created_at', startOfDay)
+                    .lt('created_at', endOfDay)
+                    .order('created_at', ascending: false);
+
+                setDialogState(() {
+                  filteredLogs = res
+                      .map((r) => {
+                            'type': r['type'] ?? '',
+                            'name': r['name'] ?? '',
+                            'time': _fmtTime(
+                                DateTime.parse(r['created_at']).toLocal()),
+                          })
+                      .toList();
+                  isLoading = false;
+                });
+              } catch (e) {
+                debugPrint('Error cargando historial: $e');
+                setDialogState(() => isLoading = false);
+              }
+            }
+
+            if (filteredLogs.isEmpty && !isLoading) {
+              loadLogsForDate(selectedDate);
+            }
+
+            return _dialog(
+              title: 'HISTORIAL DE ACCESOS',
+              child: SizedBox(
+                width: 560,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Fecha: ${selectedDate.day}/${selectedDate.month}/${selectedDate.year}',
+                          style: TextStyle(
+                              color: context.colors.white,
+                              fontWeight: FontWeight.bold),
                         ),
-                      ),
-                    ]
-                  : activities.map((a) {
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Row(children: [
-                          Icon(Icons.bolt_rounded,
-                              color: dialogContext.colors.yellow, size: 20),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(a['name'] ?? '',
-                                style: TextStyle(
-                                    color: dialogContext.colors.white,
-                                    fontSize: 13)),
-                          ),
-                          Text(a['type'] ?? '',
-                              style: TextStyle(
-                                  color: dialogContext.colors.muted,
-                                  fontSize: 11)),
-                          const SizedBox(width: 12),
-                          Text(a['time'] ?? '',
-                              style: TextStyle(
-                                  color: dialogContext.colors.muted,
-                                  fontSize: 11)),
-                        ]),
-                      );
-                    }).toList(),
-            ),
-          ),
+                        IconButton(
+                          icon: Icon(Icons.calendar_month_rounded,
+                              color: context.colors.red),
+                          onPressed: () async {
+                            final picked = await showDatePicker(
+                              context: context,
+                              initialDate: selectedDate,
+                              firstDate: DateTime.now()
+                                  .subtract(const Duration(days: 365)),
+                              lastDate: DateTime.now(),
+                              builder: (ctx, child) => Theme(
+                                data: Theme.of(ctx).copyWith(
+                                  colorScheme: ColorScheme.dark(
+                                    primary: context.colors.red,
+                                    surface: context.colors.panel,
+                                  ),
+                                ),
+                                child: child!,
+                              ),
+                            );
+                            if (picked != null) {
+                              setDialogState(() => selectedDate = picked);
+                              loadLogsForDate(picked);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    Flexible(
+                      child: isLoading
+                          ? const Center(
+                              child: Padding(
+                                  padding: EdgeInsets.all(20),
+                                  child: CircularProgressIndicator()))
+                          : filteredLogs.isEmpty
+                              ? Padding(
+                                  padding: const EdgeInsets.all(30),
+                                  child: Center(
+                                    child: Text('Sin actividad para esta fecha',
+                                        style: TextStyle(
+                                            color: dialogContext.colors.muted)),
+                                  ),
+                                )
+                              : ListView(
+                                  shrinkWrap: true,
+                                  children: filteredLogs.map((a) {
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 6),
+                                      child: Row(children: [
+                                        Icon(Icons.bolt_rounded,
+                                            color: dialogContext.colors.yellow,
+                                            size: 20),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(a['name'] ?? '',
+                                              style: TextStyle(
+                                                  color: dialogContext
+                                                      .colors.white,
+                                                  fontSize: 13)),
+                                        ),
+                                        Text(a['type'] ?? '',
+                                            style: TextStyle(
+                                                color:
+                                                    dialogContext.colors.muted,
+                                                fontSize: 11)),
+                                        const SizedBox(width: 12),
+                                        Text(a['time'] ?? '',
+                                            style: TextStyle(
+                                                color:
+                                                    dialogContext.colors.muted,
+                                                fontSize: 11)),
+                                      ]),
+                                    );
+                                  }).toList(),
+                                ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
         );
       },
     );
@@ -11293,11 +11566,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         'registered_by': 'admin',
       });
 
-      await supabase.from('activities').insert({
-        'type': isBlocked ? 'BLOQUEADO' : type,
-        'name': memberName,
-      });
-
       if (type == 'ENTRADA' && !isBlocked) {
         final attendance = (found['attendance'] as num?)?.toInt() ?? 0;
         await supabase.from('members').update({
@@ -11308,15 +11576,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
           setState(() {
             found!['attendance'] = attendance + 1;
             found['lastVisit'] = _formatDate(DateTime.now());
-            inside++;
-            clientInsideCount++;
-          });
-        }
-      } else if (type == 'SALIDA') {
-        if (mounted) {
-          setState(() {
-            if (clientInsideCount > 0) clientInsideCount--;
-            if (inside > 0) inside--;
           });
         }
       }
@@ -11330,18 +11589,22 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       await loadTodaySummary();
       await _saveLocalData();
       if (!mounted) return;
-      await _showAccessOverlay(
-        success: !isBlocked,
-        title: isBlocked ? 'ACCESO DENEGADO' : 'ACCESO PERMITIDO',
-        subtitle: isBlocked
-            ? 'Membresía $status. Contacta al gym.'
-            : type == 'ENTRADA'
-                ? '¡Bienvenido al gimnasio!'
-                : '¡Hasta pronto!',
-        name: memberName,
-        status: status,
-        type: type,
-      );
+      if (mounted) setState(() {});
+
+      _triggerDashboardAlert(memberName, status, type: type);
+
+      if (type == 'ENTRADA') {
+        await _showAccessOverlay(
+          success: !isBlocked,
+          title: isBlocked ? 'ACCESO DENEGADO' : 'BIENVENIDO',
+          subtitle: isBlocked
+              ? 'Membresía $status. Contacta al gym.'
+              : '¡Que tengas un excelente entrenamiento!',
+          name: memberName,
+          status: status,
+          type: type,
+        );
+      }
     } catch (e) {
       debugPrint('❌ Error procesando QR admin: $e');
       if (mounted) {
@@ -11451,8 +11714,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       final p = insidePeople[i];
                       final entry = p['entryTime'] as DateTime;
                       final mins = DateTime.now().difference(entry).inMinutes;
-                      final timeStr =
-                          '${entry.hour.toString().padLeft(2, '0')}:${entry.minute.toString().padLeft(2, '0')}';
+                      final timeStr = _fmtTime(entry);
                       final name = p['name'].toString();
                       final initial =
                           name.isEmpty ? '?' : name[0].toUpperCase();
@@ -11541,10 +11803,6 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
         'authorized': true,
         'registered_by': 'admin_manual',
       });
-      await supabase.from('activities').insert({
-        'type': 'SALIDA',
-        'name': memberName,
-      });
 
       await addActivity('SALIDA', memberName);
       await loadCheckins();
@@ -11554,6 +11812,9 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       await _saveLocalData();
 
       if (!mounted) return;
+      setState(() {});
+      _triggerDashboardAlert(memberName, 'ACTIVO', type: 'SALIDA');
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('✅ Salida registrada para $memberName'),
@@ -13579,280 +13840,323 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
               'Personaliza WhatsApp, PIN, monedas y preferencias del gimnasio.',
               style: TextStyle(color: context.colors.muted, fontSize: 13)),
           const SizedBox(height: 26),
-          _card(
-            title: 'AFORO MÁXIMO DEL GIMNASIO',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          _buildSettingsTile(
+            icon: Icons.people_alt_rounded,
+            title: 'Aforo Máximo',
+            subtitle: 'Capacidad actual: $capacity personas',
+            onTap: () => _showCapacityModal(),
+          ),
+          _buildSettingsTile(
+            icon: FaIcon(FontAwesomeIcons.whatsapp), // O Icons.phone_rounded
+            title: 'WhatsApp del Gimnasio',
+            subtitle: gymPhone,
+            onTap: () => _showWhatsAppModal(),
+          ),
+          _buildSettingsTile(
+            icon: Icons.lock_rounded,
+            title: 'Seguridad (PIN)',
+            subtitle: 'Cambiar el PIN de administrador',
+            onTap: () => _showPinModal(),
+          ),
+          _buildSettingsTile(
+            icon: Icons.monetization_on_rounded,
+            title: 'Moneda Principal',
+            subtitle: availableCurrencies
+                .firstWhere((c) => c['code'] == selectedCurrency)['name']!,
+            onTap: () => _showCurrencyModal(),
+          ),
+          _buildSettingsTile(
+            icon: Icons.visibility_rounded,
+            title: 'Mostrar Conversión',
+            subtitle: showConversion ? 'Activada' : 'Desactivada',
+            onTap: () => _showConversionModal(),
+          ),
+          _buildSettingsTile(
+            icon: Icons.currency_exchange_rounded,
+            title: 'Tasas de Cambio',
+            subtitle: '1 USD = $usdToVes Bs · 1 EUR = $eurToVes Bs',
+            onTap: () => _showRatesModal(),
+          ),
+          const SizedBox(height: 30),
+          _button('LISTO', context.colors.red, () async {
+            await _saveLocalData();
+            if (!mounted) return;
+            _sectionHistory.clear();
+            setState(() => _section = 0);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('✅ Configuración guardada')),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  // ---- Widget reutilizable para las filas ----
+  Widget _buildSettingsTile({
+    required dynamic icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: context.colors.panel,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(
               children: [
-                Text(
-                  'Configura la cantidad real de personas que caben en el gym. '
-                  'Esto controla el % de ocupación y las alertas.',
-                  style: TextStyle(
-                      color: context.colors.muted, fontSize: 11, height: 1.4),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _capacityController,
-                        keyboardType: TextInputType.number,
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                        ),
-                        decoration: InputDecoration(
-                          labelText: 'Capacidad (personas)',
-                          labelStyle: TextStyle(color: context.colors.muted),
-                          prefixIcon: Icon(Icons.people_alt_rounded,
-                              color: context.colors.red),
-                          filled: true,
-                          fillColor: context.colors.panel2,
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(13),
-                            borderSide:
-                                BorderSide(color: context.colors.border),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(13),
-                            borderSide: BorderSide(
-                                color: context.colors.red, width: 1.5),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    SizedBox(
-                      height: 56,
-                      width: 105,
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          final v =
-                              int.tryParse(_capacityController.text.trim());
-                          if (v == null || v <= 0) {
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: const Text(
-                                      'Ingresa una capacidad válida (> 0)'),
-                                  backgroundColor: context.colors.yellow,
-                                ),
-                              );
-                            }
-                            return;
-                          }
-
-                          setState(() => capacity = v);
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setInt('capacity', v);
-
-                          bool cloudOk = false;
-                          try {
-                            await Supabase.instance.client
-                                .from('gym_settings')
-                                .upsert(
-                              {'key': 'capacity', 'value': v.toString()},
-                              onConflict: 'key',
-                            );
-                            cloudOk = true;
-                          } catch (e) {
-                            debugPrint(
-                                '⚠️ Error guardando capacity en Supabase: $e');
-                          }
-
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                cloudOk
-                                    ? '✅ Aforo actualizado a $v personas (Nube + Local)'
-                                    : '⚠️ Guardado solo local. Error en nube.',
-                              ),
-                              backgroundColor: cloudOk
-                                  ? context.colors.green
-                                  : context.colors.yellow,
-                            ),
-                          );
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: context.colors.red,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(13)),
-                        ),
-                        child: const Text('GUARDAR',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w900, fontSize: 11)),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  width: 44,
+                  height: 44,
                   decoration: BoxDecoration(
-                    color: context.colors.green.withValues(alpha: .10),
+                    color: context.colors.red.withValues(alpha: .12),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: context.colors.green.withValues(alpha: .30)),
                   ),
-                  child: Row(children: [
-                    Icon(Icons.check_circle_rounded,
-                        color: context.colors.green, size: 18),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Aforo actual: $capacity personas · dentro ahora: $inside',
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  ]),
+                  child: Center(
+                    child: icon is IconData
+                        ? Icon(icon, color: context.colors.red, size: 22)
+                        : icon,
+                  ),
                 ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: TextStyle(
+                            color: context.colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                          )),
+                      const SizedBox(height: 2),
+                      Text(subtitle,
+                          style: TextStyle(
+                            color: context.colors.muted,
+                            fontSize: 12,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                    ],
+                  ),
+                ),
+                Icon(Icons.arrow_forward_ios_rounded,
+                    color: context.colors.muted, size: 16),
               ],
             ),
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'TEMA',
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(13),
-                onTap: () => themeController.toggle(),
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: context.colors.panel2,
+        ),
+      ),
+    );
+  }
+
+  // ---- Modales para cada opción ----
+
+  void _showCapacityModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          padding: EdgeInsets.only(
+            top: 20,
+            left: 20,
+            right: 20,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 20,
+          ),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'Aforo Máximo'),
+              const SizedBox(height: 20),
+              Text(
+                'Configura la cantidad real de personas que caben en el gym.',
+                style:
+                    TextStyle(color: sheetContext.colors.muted, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _capacityController,
+                keyboardType: TextInputType.number,
+                style: TextStyle(
+                    color: sheetContext.colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold),
+                decoration: InputDecoration(
+                  labelText: 'Capacidad (personas)',
+                  labelStyle: TextStyle(color: sheetContext.colors.muted),
+                  prefixIcon: Icon(Icons.people_alt_rounded,
+                      color: sheetContext.colors.red),
+                  filled: true,
+                  fillColor: sheetContext.colors.panel2,
+                  enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(13),
-                    border: Border.all(color: context.colors.border),
+                    borderSide: BorderSide(color: sheetContext.colors.border),
                   ),
-                  child: Row(children: [
-                    Icon(
-                      themeController.isDark
-                          ? Icons.light_mode_rounded
-                          : Icons.dark_mode_rounded,
-                      color: context.colors.red,
-                      size: 24,
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                              themeController.isDark
-                                  ? 'Modo OSCURO activo'
-                                  : 'Modo CLARO activo',
-                              style: TextStyle(
-                                color: context.colors.white,
-                                fontWeight: FontWeight.w900,
-                                fontSize: 13,
-                              )),
-                          const SizedBox(height: 3),
-                          Text(
-                              'Toca para cambiar al modo ${themeController.isDark ? "claro" : "oscuro"}',
-                              style: TextStyle(
-                                color: context.colors.muted,
-                                fontSize: 11,
-                              )),
-                        ],
-                      ),
-                    ),
-                    Icon(
-                      themeController.isDark
-                          ? Icons.light_mode_rounded
-                          : Icons.dark_mode_rounded,
-                      color: context.colors.red,
-                      size: 20,
-                    ),
-                  ]),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(13),
+                    borderSide:
+                        BorderSide(color: sheetContext.colors.red, width: 1.5),
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(height: 20),
+              _button('GUARDAR AFORO', sheetContext.colors.red, () async {
+                final v = int.tryParse(_capacityController.text.trim());
+                if (v == null || v <= 0) return;
+                setState(() => capacity = v);
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setInt('capacity', v);
+                try {
+                  await Supabase.instance.client.from('gym_settings').upsert(
+                    {'key': 'capacity', 'value': v.toString()},
+                    onConflict: 'key',
+                  );
+                } catch (_) {}
+                if (!mounted) return;
+                Navigator.pop(sheetContext);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content: Text('✅ Aforo actualizado a $v'),
+                      backgroundColor: context.colors.green),
+                );
+              }),
+              const SizedBox(height: 10),
+            ],
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'WHATSAPP DEL GIMNASIO',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Número que se abrirá al tocar WhatsApp en un cliente',
-                    style:
-                        TextStyle(color: context.colors.muted, fontSize: 11)),
-                const SizedBox(height: 14),
-                _GymPhoneField(
-                  initialValue: gymPhone,
-                  onChanged: (v) => setState(() => gymPhone = v),
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () async {
-                      final cleanPhone =
-                          gymPhone.replaceAll(RegExp(r'[^0-9]'), '');
-                      if (cleanPhone.length < 8) {
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: const Text(
-                                  'Ingresa un número de WhatsApp válido'),
-                              backgroundColor: context.colors.yellow,
-                            ),
-                          );
-                        }
-                        return;
-                      }
-                      await _saveLocalData();
-                      if (mounted) {
-                        final ctx = context;
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                          SnackBar(
-                            content: Text('WhatsApp guardado: $gymPhone'),
-                            backgroundColor: ctx.colors.green,
-                          ),
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.save_rounded, size: 18),
-                    label: const Text('GUARDAR NÚMERO',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 12,
-                        )),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: context.colors.red,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+        );
+      },
+    );
+  }
+
+  void _showWhatsAppModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          padding: EdgeInsets.only(
+            top: 20,
+            left: 20,
+            right: 20,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 20,
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'PIN DE ADMINISTRADOR',
-            child: _ChangePinSection(
-              adminPin: adminPin,
-              onPinChanged: (newPin) async {
-                setState(() => adminPin = newPin);
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'WhatsApp del Gimnasio'),
+              const SizedBox(height: 20),
+              Text(
+                'Número que se abrirá al tocar WhatsApp en un cliente.',
+                style:
+                    TextStyle(color: sheetContext.colors.muted, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              _GymPhoneField(
+                initialValue: gymPhone,
+                onChanged: (v) => setState(() => gymPhone = v),
+              ),
+              const SizedBox(height: 20),
+              _button('GUARDAR NÚMERO', sheetContext.colors.red, () async {
+                final cleanPhone = gymPhone.replaceAll(RegExp(r'[^0-9]'), '');
+                if (cleanPhone.length < 8) return;
                 await _saveLocalData();
-              },
-            ),
+                if (!mounted) return;
+                Navigator.pop(sheetContext);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content: Text('✅ WhatsApp actualizado'),
+                      backgroundColor: context.colors.green),
+                );
+              }),
+              const SizedBox(height: 10),
+            ],
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'MONEDA PRINCIPAL',
-            child: Column(
-              children: availableCurrencies.map((c) {
+        );
+      },
+    );
+  }
+
+  void _showPinModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          padding: EdgeInsets.only(
+            top: 20,
+            left: 20,
+            right: 20,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 20,
+          ),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'Seguridad (PIN)'),
+              const SizedBox(height: 20),
+              _ChangePinSection(
+                adminPin: adminPin,
+                onPinChanged: (newPin) async {
+                  setState(() => adminPin = newPin);
+                  await _saveLocalData();
+                },
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showCurrencyModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          padding:
+              const EdgeInsets.only(top: 20, left: 20, right: 20, bottom: 20),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'Moneda Principal'),
+              const SizedBox(height: 20),
+              ...availableCurrencies.map((c) {
                 final isSelected = c['code'] == selectedCurrency;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
@@ -13863,36 +14167,36 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                       onTap: () async {
                         setState(() => selectedCurrency = c['code']!);
                         await _saveLocalData();
+                        if (mounted) Navigator.pop(sheetContext);
                       },
                       child: Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
                           color: isSelected
-                              ? context.colors.red.withValues(alpha: .13)
-                              : context.colors.panel2,
+                              ? sheetContext.colors.red.withValues(alpha: .13)
+                              : sheetContext.colors.panel2,
                           borderRadius: BorderRadius.circular(13),
                           border: Border.all(
                             color: isSelected
-                                ? context.colors.red.withValues(alpha: .45)
-                                : context.colors.border,
+                                ? sheetContext.colors.red.withValues(alpha: .45)
+                                : sheetContext.colors.border,
                           ),
                         ),
                         child: Row(children: [
                           Container(
-                            width: 44,
-                            height: 44,
+                            width: 40,
+                            height: 40,
                             decoration: BoxDecoration(
-                              color: context.colors.red.withValues(alpha: .12),
+                              color: sheetContext.colors.red
+                                  .withValues(alpha: .12),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Center(
-                              child: Text(c['symbol']!,
-                                  style: TextStyle(
-                                    color: context.colors.red,
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 17,
-                                  )),
-                            ),
+                                child: Text(c['symbol']!,
+                                    style: TextStyle(
+                                        color: sheetContext.colors.red,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 16))),
                           ),
                           const SizedBox(width: 14),
                           Expanded(
@@ -13901,147 +14205,174 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
                               children: [
                                 Text(c['code']!,
                                     style: TextStyle(
-                                      color: context.colors.white,
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 15,
-                                    )),
-                                const SizedBox(height: 2),
+                                        color: sheetContext.colors.white,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 14)),
                                 Text(c['name']!,
                                     style: TextStyle(
-                                      color: context.colors.muted,
-                                      fontSize: 12,
-                                    )),
+                                        color: sheetContext.colors.muted,
+                                        fontSize: 12)),
                               ],
                             ),
                           ),
                           if (isSelected)
                             Icon(Icons.check_circle_rounded,
-                                color: context.colors.red, size: 24),
+                                color: sheetContext.colors.red, size: 24),
                         ]),
                       ),
                     ),
                   ),
                 );
-              }).toList(),
-            ),
+              }),
+              const SizedBox(height: 10),
+            ],
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'MOSTRAR CONVERSIÓN',
-            child: Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: showConversion
-                    ? context.colors.green.withValues(alpha: .10)
-                    : context.colors.panel2,
-                borderRadius: BorderRadius.circular(13),
-                border: Border.all(
+        );
+      },
+    );
+  }
+
+  void _showConversionModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'Mostrar Conversión'),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
                   color: showConversion
-                      ? context.colors.green.withValues(alpha: .35)
-                      : context.colors.border,
-                ),
-              ),
-              child: Row(children: [
-                Icon(
-                  showConversion
-                      ? Icons.visibility_rounded
-                      : Icons.visibility_off_rounded,
-                  color: showConversion
-                      ? context.colors.green
-                      : context.colors.muted,
-                  size: 24,
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                          showConversion
-                              ? 'Conversión ACTIVADA'
-                              : 'Conversión DESACTIVADA',
-                          style: TextStyle(
-                            color: showConversion
-                                ? context.colors.green
-                                : context.colors.white,
-                            fontWeight: FontWeight.w900,
-                            fontSize: 13,
-                          )),
-                      const SizedBox(height: 3),
-                      Text(
-                          showConversion
-                              ? 'Muestra el precio en bolívares debajo del principal'
-                              : 'Solo se muestra la moneda principal',
-                          style: TextStyle(
-                            color: context.colors.muted,
-                            fontSize: 11,
-                          )),
-                    ],
+                      ? sheetContext.colors.green.withValues(alpha: .10)
+                      : sheetContext.colors.panel2,
+                  borderRadius: BorderRadius.circular(13),
+                  border: Border.all(
+                    color: showConversion
+                        ? sheetContext.colors.green.withValues(alpha: .35)
+                        : sheetContext.colors.border,
                   ),
                 ),
-                Switch(
-                  value: showConversion,
-                  activeColor: context.colors.green,
-                  onChanged: (value) async {
-                    setState(() => showConversion = value);
-                    await _saveLocalData();
-                  },
-                ),
-              ]),
-            ),
+                child: Row(children: [
+                  Icon(
+                    showConversion
+                        ? Icons.visibility_rounded
+                        : Icons.visibility_off_rounded,
+                    color: showConversion
+                        ? sheetContext.colors.green
+                        : sheetContext.colors.muted,
+                    size: 24,
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      showConversion
+                          ? 'Muestra el precio en Bs debajo del principal'
+                          : 'Solo se muestra la moneda principal',
+                      style: TextStyle(
+                          color: sheetContext.colors.white, fontSize: 12),
+                    ),
+                  ),
+                  Switch(
+                    value: showConversion,
+                    activeColor: sheetContext.colors.green,
+                    onChanged: (value) async {
+                      setState(() => showConversion = value);
+                      await _saveLocalData();
+                      if (mounted) Navigator.pop(sheetContext);
+                    },
+                  ),
+                ]),
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
-          _card(
-            title: 'TASAS DE CAMBIO',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Cuantos Bolívares vale 1 unidad',
-                    style:
-                        TextStyle(color: context.colors.muted, fontSize: 11)),
-                const SizedBox(height: 14),
-                _RateField(
-                  label: '1 USD = ? Bs (Bolívares)',
-                  initialValue: usdToVes,
-                  onChanged: (v) async {
-                    setState(() => usdToVes = v);
-                    await _saveLocalData();
-                  },
-                ),
-                const SizedBox(height: 10),
-                _RateField(
-                  label: '1 EUR = ? Bs (Bolívares)',
-                  initialValue: eurToVes,
-                  onChanged: (v) async {
-                    setState(() => eurToVes = v);
-                    await _saveLocalData();
-                  },
-                ),
-                const SizedBox(height: 10),
-                _RateField(
-                  label: '1 COP = ? Bs (Bolívares)',
-                  initialValue: copToVes,
-                  onChanged: (v) async {
-                    setState(() => copToVes = v);
-                    await _saveLocalData();
-                  },
-                ),
-              ],
-            ),
+        );
+      },
+    );
+  }
+
+  void _showRatesModal() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return Container(
+          padding: EdgeInsets.only(
+            top: 20,
+            left: 20,
+            right: 20,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 20,
           ),
-          const SizedBox(height: 20),
-          _button('LISTO', context.colors.red, () async {
-            await _saveLocalData();
-            if (!mounted) return;
-            _sectionHistory.clear();
-            setState(() => _section = 0);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('✅ Configuración guardada')),
-            );
-          }),
-          const SizedBox(height: 40),
-        ],
-      ),
+          decoration: BoxDecoration(
+            color: sheetContext.colors.panel,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _modalHeader(sheetContext, 'Tasas de Cambio'),
+              const SizedBox(height: 20),
+              _RateField(
+                label: '1 USD = ? Bs',
+                initialValue: usdToVes,
+                onChanged: (v) async {
+                  setState(() => usdToVes = v);
+                  await _saveLocalData();
+                },
+              ),
+              const SizedBox(height: 10),
+              _RateField(
+                label: '1 EUR = ? Bs',
+                initialValue: eurToVes,
+                onChanged: (v) async {
+                  setState(() => eurToVes = v);
+                  await _saveLocalData();
+                },
+              ),
+              const SizedBox(height: 10),
+              _RateField(
+                label: '1 COP = ? Bs',
+                initialValue: copToVes,
+                onChanged: (v) async {
+                  setState(() => copToVes = v);
+                  await _saveLocalData();
+                },
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _modalHeader(BuildContext ctx, String title) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(title,
+              style: TextStyle(
+                color: ctx.colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+              )),
+        ),
+        IconButton(
+          onPressed: () => Navigator.pop(ctx),
+          icon: Icon(Icons.close_rounded, color: ctx.colors.muted),
+        ),
+      ],
     );
   }
 
@@ -14067,6 +14398,7 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
     _aforoTimer?.cancel();
     _qrRefreshTimer?.cancel();
     _summaryTimer?.cancel();
+    _alertTimer?.cancel();
     searchController.dispose();
     pinController.dispose();
     clientCedulaController.dispose();
@@ -15457,6 +15789,171 @@ ${secondary.isNotEmpty ? '💵 CONVERSIÓN: $secondary' : ''}
       ),
     );
   }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ✅ NUEVO: showNotifications() — FIX de los 3 errores de flutter analyze
+  // Reutiliza activeAlerts(), renewalRequests, _alertCard(), _renewalCard()
+  // y _sectionHeader() que ya existen en este archivo.
+  // ═══════════════════════════════════════════════════════════════════
+  void showNotifications() {
+    // Refresca solicitudes de renovación desde Supabase antes de abrir
+    loadRenewalRequests();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, setModalState) {
+            final alerts = activeAlerts(context);
+            final renewals =
+                renewalRequests.where((r) => r['read'] != true).toList();
+            final total = alerts.length + renewals.length;
+
+            return Container(
+              margin: EdgeInsets.only(
+                  top: MediaQuery.of(sheetContext).padding.top + 40),
+              decoration: BoxDecoration(
+                color: sheetContext.colors.bg,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(28)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Handle
+                  Container(
+                    margin: const EdgeInsets.only(top: 12),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: sheetContext.colors.muted.withValues(alpha: .4),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  // Header
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color:
+                                sheetContext.colors.red.withValues(alpha: .12),
+                            borderRadius: BorderRadius.circular(13),
+                          ),
+                          child: Icon(Icons.notifications_active_rounded,
+                              color: sheetContext.colors.red, size: 22),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('NOTIFICACIONES',
+                                  style: TextStyle(
+                                    color: sheetContext.colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1,
+                                  )),
+                              const SizedBox(height: 2),
+                              Text('$total pendiente(s)',
+                                  style: TextStyle(
+                                    color: sheetContext.colors.muted,
+                                    fontSize: 11,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Refrescar',
+                          onPressed: () async {
+                            await loadRenewalRequests();
+                            if (mounted) setState(() {});
+                            setModalState(() {});
+                          },
+                          icon: Icon(Icons.refresh_rounded,
+                              color: sheetContext.colors.red, size: 20),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(sheetContext),
+                          icon: Icon(Icons.close_rounded,
+                              color: sheetContext.colors.muted, size: 22),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Lista
+                  Flexible(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight:
+                            MediaQuery.of(sheetContext).size.height * 0.65,
+                      ),
+                      child: total == 0
+                          ? Padding(
+                              padding: const EdgeInsets.all(40),
+                              child: Center(
+                                child: Column(
+                                  children: [
+                                    Icon(Icons.check_circle_rounded,
+                                        color: sheetContext.colors.green,
+                                        size: 48),
+                                    const SizedBox(height: 12),
+                                    Text('Todo en orden',
+                                        style: TextStyle(
+                                          color: sheetContext.colors.white,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w800,
+                                        )),
+                                    const SizedBox(height: 4),
+                                    Text('No hay notificaciones pendientes',
+                                        style: TextStyle(
+                                          color: sheetContext.colors.muted,
+                                          fontSize: 11,
+                                        )),
+                                  ],
+                                ),
+                              ),
+                            )
+                          : ListView(
+                              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                              children: [
+                                if (renewals.isNotEmpty) ...[
+                                  _sectionHeader(
+                                      'SOLICITUDES DE RENOVACIÓN',
+                                      sheetContext.colors.yellow,
+                                      renewals.length),
+                                  const SizedBox(height: 12),
+                                  ...renewals.map((r) => _renewalCard(r)),
+                                  const SizedBox(height: 16),
+                                ],
+                                if (alerts.isNotEmpty) ...[
+                                  _sectionHeader('ALERTAS ACTIVAS',
+                                      sheetContext.colors.red, alerts.length),
+                                  const SizedBox(height: 12),
+                                  ...alerts.map((a) => _alertCard(a)),
+                                ],
+                              ],
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    ).then((_) {
+      // Al cerrar, refresca el badge del header/sidebar
+      if (mounted) setState(() {});
+    });
+  }
 }
 
 class _OccupancyPainter extends CustomPainter {
@@ -16147,51 +16644,81 @@ class _ClientProfilePage extends StatelessWidget {
                 color: context.colors.bg,
                 border: Border(top: BorderSide(color: context.colors.border)),
               ),
-              child: Row(children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      Future.microtask(() => onEdit());
-                    },
-                    icon: Icon(Icons.edit_rounded,
-                        color: context.colors.yellow, size: 16),
-                    label: Text('EDITAR',
-                        style: TextStyle(
-                          color: context.colors.white,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11,
-                          letterSpacing: .5,
-                        )),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      side: BorderSide(color: context.colors.border),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // ✅ BOTÓN DE COBRO RÁPIDO (Solo si no está activo)
+                  if (member['status'].toString().toUpperCase() !=
+                      'ACTIVO') ...[
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          onEdit(); // <-- Cambiado para que abra el pago rápido
+                        },
+                        icon: const Icon(Icons.attach_money_rounded, size: 24),
+                        label: Text(
+                          'COBRAR Y ACTIVAR (${member['plan']})',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w900, fontSize: 14),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: context.colors.green,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
                     ),
+                    const SizedBox(height: 12),
+                  ],
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () {
+                            Navigator.pop(context);
+                            Future.microtask(() => onEdit());
+                          },
+                          icon: Icon(Icons.edit_rounded,
+                              color: context.colors.yellow, size: 16),
+                          label: Text('EDITAR',
+                              style: TextStyle(
+                                  color: context.colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 11)),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            side: BorderSide(color: context.colors.border),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: onWhatsApp,
+                          icon:
+                              const FaIcon(FontAwesomeIcons.whatsapp, size: 16),
+                          label: const Text('WHATSAPP',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w900, fontSize: 11)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: context.colors.green,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: onWhatsApp,
-                    icon: const FaIcon(FontAwesomeIcons.whatsapp, size: 16),
-                    label: const Text('WHATSAPP',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11,
-                          letterSpacing: .5,
-                        )),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: context.colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                  ),
-                ),
-              ]),
+                ],
+              ),
             ),
           ],
         ),
