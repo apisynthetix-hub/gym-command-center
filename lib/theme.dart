@@ -9,16 +9,16 @@ extension ThemeColors on BuildContext {
     // Si el controlador dice que es oscuro, devolvemos los colores oscuros
     if (Theme.of(this).brightness == Brightness.dark) {
       return const AppColorScheme(
-        bg: Color(0xFF0A0A0A),
-        panel: Color(0xFF1A1A1A),
-        panel2: Color(0xFF252525),
-        border: Color(0xFF2A2A2A),
+        bg: Color(0xFF090D0C),
+        panel: Color(0xFF121918),
+        panel2: Color(0xFF1A2421),
+        border: Color(0xFF2C3B35),
         white: Colors.white,
         muted: Color(0xFF888888),
-        red: Color(0xFFFF1744),
-        green: Color(0xFF00E676),
-        blue: Color(0xFF2979FF),
-        yellow: Color(0xFFFFEA00),
+        red: Color(0xFFD96972),
+        green: Color(0xFF20B8A8),
+        blue: Color(0xFF20B8A8),
+        yellow: Color(0xFFD7A84E),
       );
     } else {
       // Si es claro, devolvemos colores claros
@@ -29,10 +29,10 @@ extension ThemeColors on BuildContext {
         border: Color(0xFFDDDDDD),
         white: Color(0xFF121212),
         muted: Color(0xFF666666),
-        red: Color(0xFFD50000),
-        green: Color(0xFF00C853),
-        blue: Color(0xFF2962FF),
-        yellow: Color(0xFFFFAB00),
+        red: Color(0xFFBD4A50),
+        green: Color(0xFF168F84),
+        blue: Color(0xFF168F84),
+        yellow: Color(0xFFB17B22),
       );
     }
   }
@@ -78,8 +78,8 @@ class AppTheme {
       brightness: Brightness.light,
       scaffoldBackgroundColor: const Color(0xFFF5F5F5),
       colorScheme: const ColorScheme.light(
-        primary: Color(0xFFD50000),
-        secondary: Color(0xFF00C853),
+        primary: Color(0xFF168F84),
+        secondary: Color(0xFF20B8A8),
       ),
       fontFamily: 'Roboto',
     );
@@ -90,8 +90,8 @@ class AppTheme {
       brightness: Brightness.dark,
       scaffoldBackgroundColor: const Color(0xFF0A0A0A),
       colorScheme: const ColorScheme.dark(
-        primary: Color(0xFFFF1744),
-        secondary: Color(0xFF00E676),
+        primary: Color(0xFF20B8A8),
+        secondary: Color(0xFF168F84),
       ),
       fontFamily: 'Roboto',
     );

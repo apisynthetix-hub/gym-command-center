@@ -79,7 +79,7 @@ class RoleSelectorScreen extends StatelessWidget {
                   const SizedBox(height: 16),
                   _btn(
                     icon: Icons.shield_rounded,
-                    title: 'SOY ADMIN',
+                    title: 'SOY ADMINISTRADOR',
                     subtitle: 'Acceso con PIN de seguridad',
                     color: kRed,
                     onTap: () => Navigator.push(

@@ -226,7 +226,7 @@ class _AdminPinScreenState extends State<AdminPinScreen> {
                         Icon(Icons.shield_rounded, color: kRed, size: 14),
                         SizedBox(width: 6),
                         Text(
-                          'ADMIN',
+                          'ADMINISTRADOR',
                           style: TextStyle(
                             color: kRed,
                             fontSize: 10,
@@ -268,7 +268,7 @@ class _AdminPinScreenState extends State<AdminPinScreen> {
                       ),
                       const SizedBox(height: 22),
                       const Text(
-                        'ACCESO ADMIN',
+                        'ACCESO ADMINISTRADOR',
                         style: TextStyle(
                           color: kWhite,
                           fontSize: 22,
@@ -461,7 +461,7 @@ class _AdminPinScreenState extends State<AdminPinScreen> {
                     ),
                     const SizedBox(height: 10),
                     const Text(
-                      'Guarda este PIN. Lo necesitarás cada vez que entres como admin.',
+                      'Guarda este PIN. Lo necesitarás cada vez que ingreses como administrador.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: kMuted, fontSize: 12),
                     ),

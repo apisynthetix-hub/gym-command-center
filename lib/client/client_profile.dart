@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,16 +8,15 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 // COLORES
 // ═══════════════════════════════════════════════════════════
 
-const Color kBg = Color(0xFF020202);
-const Color kPanel = Color(0xFF070707);
-const Color kPanel2 = Color(0xFF0D0D0D);
-const Color kBorder = Color(0xFF202020);
-const Color kRed = Color(0xFFFF1744);
-const Color kYellow = Color(0xFFFFEA00);
-const Color kPurple = Color(0xFFB000FF);
-const Color kGreen = Color(0xFF00FF85);
-const Color kWhite = Color(0xFFF4F4F5);
-const Color kMuted = Color(0xFF77777F);
+const Color kBg = Color(0xFF0B1118);
+const Color kPanel = Color(0xFF121B24);
+const Color kPanel2 = Color(0xFF192631);
+const Color kBorder = Color(0xFF293944);
+const Color kRed = Color(0xFFC96B72);
+const Color kYellow = Color(0xFFC09A56);
+const Color kGreen = Color(0xFF168F84);
+const Color kWhite = Color(0xFFF1F6F7);
+const Color kMuted = Color(0xFF99AAB1);
 
 // ═══════════════════════════════════════════════════════════
 // PERFIL DEL CLIENTE
@@ -87,6 +85,8 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
           'attendance': response['attendance'] ?? 0,
           'lastVisit': response['last_visit'] ?? '',
           'qrCode': response['qr_code'] ?? '',
+          'assignedRoutine': response['assigned_routine'] ?? '',
+          'assignedRoutineId': response['assigned_routine_id'] ?? '',
           'isInside': response['is_inside'] ?? false,
         };
         _isInside = response['is_inside'] == true;
@@ -163,8 +163,14 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
           .from('checkins')
           .select()
           .eq('member_id', widget.memberId)
-          .order('created_at', ascending: false)
-          .limit(30);
+          .gte(
+            'created_at',
+            DateTime.now()
+                .subtract(const Duration(days: 30))
+                .toUtc()
+                .toIso8601String(),
+          )
+          .order('created_at', ascending: false);
 
       final loaded = <Map<String, dynamic>>[];
       for (final row in response) {
@@ -175,6 +181,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
         loaded.add({
           'type': row['type'] ?? 'ENTRADA',
           'date': _formatDateTime(createdAt),
+          'createdAt': createdAt,
         });
       }
 
@@ -208,6 +215,97 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
         '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   }
 
+  DateTime? _parseProfileDate(Object? value) {
+    final text = value?.toString().trim() ?? '';
+    if (text.isEmpty) return null;
+
+    final isoDate = DateTime.tryParse(text);
+    if (isoDate != null) return isoDate;
+
+    final numericDate =
+        RegExp(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$').firstMatch(text);
+    if (numericDate != null) {
+      return DateTime(
+        int.parse(numericDate.group(3)!),
+        int.parse(numericDate.group(2)!),
+        int.parse(numericDate.group(1)!),
+      );
+    }
+
+    const monthNumbers = {
+      'ENE': 1,
+      'FEB': 2,
+      'MAR': 3,
+      'ABR': 4,
+      'MAY': 5,
+      'JUN': 6,
+      'JUL': 7,
+      'AGO': 8,
+      'SEP': 9,
+      'OCT': 10,
+      'NOV': 11,
+      'DIC': 12,
+    };
+    final spanishDate =
+        RegExp(r'^(\d{1,2})\s+([A-ZÁÉÍÓÚ]{3})\s+(\d{4})$', caseSensitive: false)
+            .firstMatch(text);
+    if (spanishDate == null) return null;
+    final month = monthNumbers[spanishDate.group(2)!.toUpperCase()];
+    if (month == null) return null;
+    return DateTime(
+      int.parse(spanishDate.group(3)!),
+      month,
+      int.parse(spanishDate.group(1)!),
+    );
+  }
+
+  int get _visitsLast30Days {
+    return _checkins.where((checkin) {
+      final date = checkin['createdAt'];
+      return checkin['type'].toString().toUpperCase() == 'ENTRADA' &&
+          date is DateTime;
+    }).length;
+  }
+
+  String _initials(String name) {
+    final parts =
+        name.trim().split(RegExp(r'\s+')).where((part) => part.isNotEmpty);
+    final initials = parts.take(2).map((part) => part[0].toUpperCase()).join();
+    return initials.isEmpty ? '?' : initials;
+  }
+
+  String _paymentMethodLabel(Object? method) {
+    switch (method?.toString().trim().toUpperCase()) {
+      case 'EFECTIVO':
+        return 'Efectivo';
+      case 'TARJETA':
+        return 'Tarjeta';
+      case 'TRANSFERENCIA':
+        return 'Transferencia';
+      case 'PAGO MÓVIL':
+      case 'PAGO MOVIL':
+        return 'Pago móvil';
+      default:
+        final value = method?.toString().trim() ?? '';
+        return value.isEmpty ? 'Método no especificado' : value;
+    }
+  }
+
+  String _classTypeLabel(Object? type) {
+    switch (type?.toString().trim().toUpperCase()) {
+      case 'SPINNING':
+        return 'Ciclismo indoor';
+      case 'CROSSFIT':
+        return 'Acondicionamiento funcional';
+      case 'YOGA':
+        return 'Yoga';
+      case 'PILATES':
+        return 'Pilates';
+      default:
+        return type?.toString().trim() ?? '';
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════
   // GETTERS DE ESTADO (usados por varios widgets)
   // ═══════════════════════════════════════════════════════════
@@ -239,14 +337,14 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
   Future<void> _scanGymQr() async {
     if (!_canEnterGym) {
       _showSnack(
-        '⛔ Tu membresía no está activa. Contacta al admin.',
+        '⛔ Tu membresía no está activa. Contacta al administrador.',
         kRed,
       );
       return;
     }
 
     if (_isInside) {
-      _showSnack('⚠️ Ya estás dentro del gym', kYellow);
+      _showSnack('⚠️ Ya estás dentro del gimnasio', kYellow);
       return;
     }
 
@@ -268,7 +366,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                   children: [
                     const Expanded(
                       child: Text(
-                        'ESCANEAR QR DEL GYM',
+                        'ESCANEAR QR DEL GIMNASIO',
                         style: TextStyle(
                           color: kWhite,
                           fontSize: 16,
@@ -301,7 +399,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
               const Padding(
                 padding: EdgeInsets.all(18),
                 child: Text(
-                  'Apunta al QR pegado en la entrada del gym',
+                  'Apunta al código QR de la entrada del gimnasio',
                   style: TextStyle(color: kMuted, fontSize: 12),
                   textAlign: TextAlign.center,
                 ),
@@ -369,7 +467,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
 
   Future<void> _markExit() async {
     if (!_isInside) {
-      _showSnack('⚠️ No estás dentro del gym', kYellow);
+      _showSnack('⚠️ No estás dentro del gimnasio', kYellow);
       return;
     }
 
@@ -436,27 +534,92 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
+      return Scaffold(
         backgroundColor: kBg,
-        body: Center(child: CircularProgressIndicator(color: kGreen)),
+        body: Center(
+          child: Container(
+            width: 320,
+            padding: const EdgeInsets.all(28),
+            decoration: BoxDecoration(
+              color: kPanel,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: kBorder),
+            ),
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: kGreen),
+                SizedBox(height: 18),
+                Text(
+                  'Preparando tu perfil',
+                  style: TextStyle(
+                      color: kWhite, fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Estamos organizando la información de tu cuenta.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: kMuted, fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
       );
     }
 
     if (_member == null) {
       return Scaffold(
         backgroundColor: kBg,
-        body: const Center(
-          child: Text(
-            'No se encontró tu perfil',
-            style: TextStyle(color: kMuted),
+        body: Center(
+          child: Container(
+            width: 420,
+            margin: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(28),
+            decoration: BoxDecoration(
+              color: kPanel,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: kBorder),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.person_search_outlined,
+                    color: kMuted, size: 38),
+                const SizedBox(height: 14),
+                const Text(
+                  'No encontramos tu perfil',
+                  style: TextStyle(
+                      color: kWhite, fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 7),
+                const Text(
+                  'Verifica tu conexión e intenta cargar la información nuevamente.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: kMuted, fontSize: 13, height: 1.4),
+                ),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  onPressed: _loadAll,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Intentar de nuevo'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: kGreen,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       );
     }
 
     final name = _member!['name'].toString();
-    final initial = name.isEmpty ? '?' : name[0].toUpperCase();
-    final isPending = status.toUpperCase() == 'PENDIENTE PAGO';
+    final initial = _initials(name);
+    final normalizedStatus = status.toUpperCase();
+    final isPending =
+        normalizedStatus == 'PENDIENTE PAGO' || normalizedStatus == 'PENDIENTE';
 
     return Scaffold(
       backgroundColor: kBg,
@@ -467,79 +630,171 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
           onRefresh: _loadAll,
           child: SingleChildScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Hola, ${name.split(' ').first}',
-                        style: const TextStyle(
-                          color: kWhite,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -0.5,
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 48),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final contentWidth =
+                    constraints.maxWidth.clamp(0.0, 1440.0).toDouble();
+                final cardColumns = contentWidth >= 1260
+                    ? 3
+                    : contentWidth >= 660
+                        ? 2
+                        : 1;
+                const cardGap = 20.0;
+                final cardWidth = cardColumns == 1
+                    ? contentWidth
+                    : (contentWidth - (cardColumns - 1) * cardGap) /
+                        cardColumns;
+                final metricColumns = contentWidth >= 1120
+                    ? 4
+                    : contentWidth >= 580
+                        ? 2
+                        : 1;
+                final metricWidth = metricColumns == 1
+                    ? contentWidth
+                    : (contentWidth - (metricColumns - 1) * 12) / metricColumns;
+                return Center(
+                  child: SizedBox(
+                    width: contentWidth,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'PORTAL DEL CLIENTE',
+                                    style: TextStyle(
+                                      color: kGreen,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 1.2,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 5),
+                                  Text(
+                                    'Hola, ${name.trim().split(RegExp(r'\s+')).first}',
+                                    style: const TextStyle(
+                                      color: kWhite,
+                                      fontSize: 26,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: -0.5,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: _loadAll,
+                              icon: const Icon(Icons.refresh_rounded,
+                                  color: kMuted, size: 21),
+                              tooltip: 'Actualizar información',
+                            ),
+                            IconButton(
+                              onPressed: _logout,
+                              icon: const Icon(Icons.logout_rounded,
+                                  color: kMuted, size: 22),
+                              tooltip: 'Cerrar sesión',
+                            ),
+                          ],
                         ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Tu espacio personal para consultar tu membresía, entrenamientos y actividad.',
+                          style: const TextStyle(color: kMuted, fontSize: 13),
+                        ),
+                        const SizedBox(height: 18),
+                        if (isPending) _pendingBanner(),
+                        _profileHeader(name, initial),
+                        const SizedBox(height: 14),
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            SizedBox(
+                              width: metricWidth,
+                              child: _overviewMetric(
+                                'Visitas registradas',
+                                '${_member!['attendance']}',
+                                Icons.event_available_rounded,
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              child: _overviewMetric(
+                                'Visitas últimos 30 días',
+                                '$_visitsLast30Days',
+                                Icons.calendar_view_month_rounded,
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              child: _overviewMetric(
+                                'Total abonado',
+                                '\$${(_member!['totalPaid'] as num).toStringAsFixed(2)}',
+                                Icons.account_balance_wallet_outlined,
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              child: _overviewMetric(
+                                'Pagos registrados',
+                                '${_member!['payments']}',
+                                Icons.receipt_long_outlined,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        _sectionHeading('Membresía y acceso'),
+                        Wrap(
+                          spacing: 20,
+                          runSpacing: 20,
+                          children: [
+                            SizedBox(
+                                width: cardWidth, child: _membershipCard()),
+                            SizedBox(width: cardWidth, child: _accessCard()),
+                            SizedBox(width: cardWidth, child: _qrCard()),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        _sectionHeading('Entrenamiento y actividad'),
+                        Wrap(
+                          spacing: 20,
+                          runSpacing: 20,
+                          children: [
+                            SizedBox(width: cardWidth, child: _routineCard()),
+                            SizedBox(width: cardWidth, child: _scheduleCard()),
+                            SizedBox(width: cardWidth, child: _paymentsCard()),
+                            SizedBox(
+                                width: cardWidth, child: _attendanceCard()),
+                          ],
+                        ),
+                      ],
                     ),
-                    IconButton(
-                      onPressed: _logout,
-                      icon: const Icon(Icons.logout_rounded,
-                          color: kMuted, size: 22),
-                      tooltip: 'Cerrar sesión',
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Cédula: ${_member!['cedula']}',
-                  style: const TextStyle(color: kMuted, fontSize: 12),
-                ),
-
-                const SizedBox(height: 20),
-
-                // Banner pendiente de pago
-                if (isPending) _pendingBanner(),
-
-                // Card de perfil
-                _profileHeader(name, initial),
-
-                const SizedBox(height: 16),
-
-                // Card de membresía
-                _membershipCard(),
-
-                const SizedBox(height: 16),
-
-                // Card de entrada/salida
-                _accessCard(),
-
-                const SizedBox(height: 16),
-
-                // Card del QR personal
-                _qrCard(),
-
-                const SizedBox(height: 16),
-
-                // Horarios
-                _scheduleCard(),
-
-                const SizedBox(height: 16),
-
-                // Historial de pagos
-                _paymentsCard(),
-
-                const SizedBox(height: 16),
-
-                // Historial de asistencia
-                _attendanceCard(),
-              ],
+                  ),
+                );
+              },
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionHeading(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(
+        title,
+        style: const TextStyle(
+          color: kWhite,
+          fontSize: 16,
+          fontWeight: FontWeight.w700,
         ),
       ),
     );
@@ -550,29 +805,29 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: kYellow.withValues(alpha: .10),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kYellow.withValues(alpha: .40)),
+        color: kPanel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kBorder),
       ),
-      child: const Row(
+      child: Row(
         children: [
-          Icon(Icons.hourglass_top_rounded, color: kYellow, size: 24),
-          SizedBox(width: 12),
+          const Icon(Icons.hourglass_top_rounded, color: kYellow, size: 22),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '⏳ Esperando activación',
+                const Text(
+                  'Membresía pendiente de activación',
                   style: TextStyle(
                     color: kYellow,
                     fontSize: 13,
-                    fontWeight: FontWeight.w900,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
-                SizedBox(height: 4),
-                Text(
-                  'Tu pago será confirmado por el admin. Mientras tanto, puedes ver tu QR y horarios.',
+                const SizedBox(height: 4),
+                const Text(
+                  'Tu pago será confirmado por el administrador. Mientras tanto, puedes ver tu código QR y tus horarios.',
                   style: TextStyle(
                     color: kWhite,
                     fontSize: 11,
@@ -589,91 +844,75 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
 
   Widget _profileHeader(String name, String initial) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            _statusColor.withValues(alpha: .15),
-            kPanel,
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: _statusColor.withValues(alpha: .30)),
+        color: kPanel,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: kBorder),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            width: 70,
-            height: 70,
+            width: 64,
+            height: 64,
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [_statusColor, _statusColor.withValues(alpha: .6)],
-              ),
-              borderRadius: BorderRadius.circular(20),
-              boxShadow: [
-                BoxShadow(
-                  color: _statusColor.withValues(alpha: .30),
-                  blurRadius: 20,
-                ),
-              ],
+              color: kPanel2,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: kBorder),
             ),
             alignment: Alignment.center,
             child: Text(
               initial,
               style: const TextStyle(
-                color: Colors.black,
-                fontSize: 30,
-                fontWeight: FontWeight.w900,
-              ),
+                  color: kGreen, fontSize: 26, fontWeight: FontWeight.w800),
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 18),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  name,
-                  style: const TextStyle(
-                    color: kWhite,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.3,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Plan ${_member!['plan']}',
-                  style: TextStyle(
-                    color: _statusColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        color: kWhite,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.3,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    _statusBadge(status, _statusColor),
+                  ],
                 ),
                 const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: _statusColor.withValues(alpha: .15),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: _statusColor.withValues(alpha: .45),
+                Text(
+                  'Plan ${_member!['plan']}',
+                  style: const TextStyle(
+                      color: kGreen, fontSize: 13, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 20,
+                  runSpacing: 10,
+                  children: [
+                    _profileDetail(
+                        Icons.badge_outlined, 'Cédula', _member!['cedula']),
+                    _profileDetail(
+                        Icons.phone_outlined, 'Teléfono', _member!['phone']),
+                    _profileDetail(
+                      Icons.calendar_month_outlined,
+                      'Miembro desde',
+                      _member!['memberSince'],
                     ),
-                  ),
-                  child: Text(
-                    status,
-                    style: TextStyle(
-                      color: _statusColor,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1,
-                    ),
-                  ),
+                  ],
                 ),
               ],
             ),
@@ -683,18 +922,195 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
     );
   }
 
+  Widget _overviewMetric(String label, String value, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: kPanel,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kBorder),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: kGreen, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: const TextStyle(color: kMuted, fontSize: 11)),
+                const SizedBox(height: 4),
+                Text(value,
+                    style: const TextStyle(
+                        color: kWhite,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _profileDetail(IconData icon, String label, Object? value) {
+    final text = value?.toString().trim() ?? '';
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: kMuted, size: 15),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text('$label: ${text.isEmpty ? 'No registrado' : text}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: kMuted, fontSize: 11)),
+        ),
+      ],
+    );
+  }
+
+  Widget _statusBadge(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: kPanel2,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: kBorder),
+      ),
+      child: Text(label,
+          style: TextStyle(
+              color: color, fontSize: 10, fontWeight: FontWeight.w700)),
+    );
+  }
+
   Widget _membershipCard() {
+    final expiry = _parseProfileDate(_member!['expiry']);
+    final start = _parseProfileDate(_member!['memberSince']);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final daysRemaining = expiry?.difference(today).inDays;
+    final totalDays =
+        expiry != null && start != null ? expiry.difference(start).inDays : 0;
+    final elapsedDays = start == null ? 0 : today.difference(start).inDays;
+    final progress = totalDays > 0
+        ? (elapsedDays / totalDays).clamp(0.0, 1.0).toDouble()
+        : null;
+
     return _card(
       title: 'MI MEMBRESÍA',
       icon: Icons.card_membership_rounded,
       color: _statusColor,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _infoRow('Estado', status, color: _statusColor),
-          _infoRow('Vence', _member!['expiry'].toString()),
-          _infoRow('Miembro desde', _member!['memberSince'].toString()),
-          _infoRow('Última visita', _member!['lastVisit'].toString(),
-              isLast: true),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _member!['plan'].toString(),
+                      style: const TextStyle(
+                        color: kWhite,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      'Membresía ${status.toLowerCase()}',
+                      style: const TextStyle(color: kMuted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              _statusBadge(status, _statusColor),
+            ],
+          ),
+          const SizedBox(height: 18),
+          _infoRow(
+            'Vigencia hasta',
+            _member!['expiry'].toString().isEmpty
+                ? 'Sin fecha registrada'
+                : _member!['expiry'].toString(),
+          ),
+          _infoRow(
+            'Antigüedad',
+            _member!['memberSince'].toString().isEmpty
+                ? 'Sin registro'
+                : _member!['memberSince'].toString(),
+          ),
+          _infoRow(
+            'Última visita',
+            _member!['lastVisit'].toString().isEmpty
+                ? 'Sin registro'
+                : _member!['lastVisit'].toString(),
+            isLast: daysRemaining == null,
+          ),
+          if (daysRemaining != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  daysRemaining < 0
+                      ? Icons.error_outline_rounded
+                      : daysRemaining <= 7
+                          ? Icons.schedule_rounded
+                          : Icons.verified_outlined,
+                  color: daysRemaining < 0
+                      ? kRed
+                      : daysRemaining <= 7
+                          ? kYellow
+                          : kGreen,
+                  size: 17,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    daysRemaining < 0
+                        ? 'La vigencia terminó hace ${daysRemaining.abs()} días'
+                        : daysRemaining == 0
+                            ? 'La membresía vence hoy'
+                            : 'Quedan $daysRemaining días de vigencia',
+                    style: TextStyle(
+                      color: daysRemaining < 0
+                          ? kRed
+                          : daysRemaining <= 7
+                              ? kYellow
+                              : kMuted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (progress != null) ...[
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 5,
+                backgroundColor: kPanel2,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  daysRemaining != null && daysRemaining <= 7
+                      ? kYellow
+                      : kGreen,
+                ),
+              ),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'Periodo de membresía transcurrido',
+              style: TextStyle(color: kMuted, fontSize: 10),
+            ),
+          ],
         ],
       ),
     );
@@ -702,9 +1118,9 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
 
   Widget _accessCard() {
     return _card(
-      title: 'ACCESO AL GYM',
+      title: 'ACCESO AL GIMNASIO',
       icon: Icons.qr_code_scanner_rounded,
-      color: _isInside ? kGreen : kPurple,
+      color: kGreen,
       child: Column(
         children: [
           Container(
@@ -741,7 +1157,9 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        _isInside ? 'DENTRO DEL GYM' : 'FUERA DEL GYM',
+                        _isInside
+                            ? 'DENTRO DEL GIMNASIO'
+                            : 'FUERA DEL GIMNASIO',
                         style: TextStyle(
                           color: _isInside ? kGreen : kWhite,
                           fontSize: 12,
@@ -753,7 +1171,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                       Text(
                         _isInside
                             ? 'No olvides marcar tu salida'
-                            : 'Escanea el QR del gym para entrar',
+                            : 'Escanea el código QR del gimnasio para entrar',
                         style: const TextStyle(
                           color: kMuted,
                           fontSize: 10,
@@ -779,7 +1197,9 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                 onPressed: _canEnterGym ? _scanGymQr : null,
                 icon: const Icon(Icons.qr_code_scanner_rounded, size: 20),
                 label: Text(
-                  _canEnterGym ? 'ESCANEAR QR DEL GYM' : 'MEMBRESÍA NO ACTIVA',
+                  _canEnterGym
+                      ? 'ESCANEAR QR DEL GIMNASIO'
+                      : 'MEMBRESÍA NO ACTIVA',
                   style: const TextStyle(
                     fontWeight: FontWeight.w900,
                     fontSize: 12,
@@ -814,7 +1234,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                   ),
                 ),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: kYellow,
+                  backgroundColor: kGreen,
                   foregroundColor: Colors.black,
                   elevation: 0,
                   shape: RoundedRectangleBorder(
@@ -829,40 +1249,112 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
   }
 
   Widget _qrCard() {
+    final qrCode = _member!['qrCode'].toString().trim();
     return _card(
-      title: 'MI QR PERSONAL',
+      title: 'MI CÓDIGO DE ACCESO',
       icon: Icons.qr_code_2_rounded,
-      color: kPurple,
+      color: kGreen,
       child: Column(
         children: [
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(20),
+          if (qrCode.isEmpty)
+            Container(
+              width: 220,
+              height: 220,
+              decoration: BoxDecoration(
+                color: kPanel2,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: kBorder),
+              ),
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.qr_code_2_rounded, color: kMuted, size: 42),
+                  SizedBox(height: 8),
+                  Text('Código no disponible',
+                      style: TextStyle(color: kMuted, fontSize: 12)),
+                ],
+              ),
+            )
+          else
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: QrImageView(
+                data: qrCode,
+                size: 188,
+                backgroundColor: Colors.white,
+                errorCorrectionLevel: QrErrorCorrectLevel.M,
+              ),
             ),
-            child: QrImageView(
-              data: _member!['qrCode'].toString(),
-              size: 200,
-              backgroundColor: Colors.white,
-            ),
-          ),
           const SizedBox(height: 14),
-          Text(
-            _member!['qrCode'].toString(),
-            style: const TextStyle(
-              color: kMuted,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1,
+          if (qrCode.isNotEmpty)
+            SelectableText(
+              qrCode,
+              style: const TextStyle(
+                color: kMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                letterSpacing: .5,
+              ),
+              textAlign: TextAlign.center,
             ),
+          const SizedBox(height: 6),
+          const Text(
+            'Presenta este código en recepción para identificar tu cuenta.',
+            style: TextStyle(color: kMuted, fontSize: 11, height: 1.4),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 8),
-          const Text(
-            'Muestra este QR al recepcionista si lo solicita',
-            style: TextStyle(color: kMuted, fontSize: 10),
-            textAlign: TextAlign.center,
+        ],
+      ),
+    );
+  }
+
+  Widget _routineCard() {
+    final routine = _member!['assignedRoutine'].toString().trim();
+    return _card(
+      title: 'MI RUTINA',
+      icon: Icons.fitness_center_rounded,
+      color: kGreen,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (routine.isEmpty)
+            const Text(
+              'Aún no tienes una rutina asignada. Consulta con tu entrenador para definir tu plan de entrenamiento.',
+              style: TextStyle(color: kMuted, fontSize: 12, height: 1.5),
+            )
+          else ...[
+            Text(
+              routine,
+              style: const TextStyle(
+                color: kWhite,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'Rutina asignada por tu gimnasio.',
+              style: TextStyle(color: kMuted, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Icon(Icons.calendar_today_outlined, color: kGreen, size: 17),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _classes.isEmpty
+                      ? 'Sin clases semanales programadas'
+                      : '${_classes.length} ${_classes.length == 1 ? 'clase semanal' : 'clases semanales'} disponibles',
+                  style: const TextStyle(color: kMuted, fontSize: 11),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -887,7 +1379,15 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
       );
     }
 
-    final days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES'];
+    final days = [
+      'LUNES',
+      'MARTES',
+      'MIÉRCOLES',
+      'JUEVES',
+      'VIERNES',
+      'SÁBADO',
+      'DOMINGO',
+    ];
 
     return _card(
       title: 'HORARIOS DE ENTRENAMIENTO',
@@ -941,13 +1441,13 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                             vertical: 3,
                           ),
                           decoration: BoxDecoration(
-                            color: kPurple.withValues(alpha: .15),
+                            color: kGreen.withValues(alpha: .15),
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(
                             c['time'].toString(),
                             style: const TextStyle(
-                              color: kPurple,
+                              color: kGreen,
                               fontSize: 10,
                               fontWeight: FontWeight.w900,
                             ),
@@ -955,23 +1455,34 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Text(
-                            c['name'].toString(),
-                            style: const TextStyle(
-                              color: kWhite,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                c['name'].toString(),
+                                style: const TextStyle(
+                                  color: kWhite,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                [
+                                  if (c['type'].toString().trim().isNotEmpty)
+                                    _classTypeLabel(c['type']),
+                                  if (c['trainer'].toString().trim().isNotEmpty)
+                                    'Entrena ${c['trainer']}',
+                                ].join(' · '),
+                                style: const TextStyle(
+                                    color: kMuted, fontSize: 10),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ),
-                        ),
-                        Text(
-                          c['trainer'].toString(),
-                          style: const TextStyle(
-                            color: kMuted,
-                            fontSize: 10,
-                          ),
-                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),
@@ -989,7 +1500,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
     return _card(
       title: 'MIS PAGOS',
       icon: Icons.receipt_long_rounded,
-      color: kYellow,
+      color: kGreen,
       child: _payments.isEmpty
           ? const Padding(
               padding: EdgeInsets.symmetric(vertical: 20),
@@ -1016,12 +1527,12 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                         width: 36,
                         height: 36,
                         decoration: BoxDecoration(
-                          color: kYellow.withValues(alpha: .12),
+                          color: kGreen.withValues(alpha: .12),
                           borderRadius: BorderRadius.circular(10),
                         ),
                         child: const Icon(
                           Icons.payments_rounded,
-                          color: kYellow,
+                          color: kGreen,
                           size: 18,
                         ),
                       ),
@@ -1031,7 +1542,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              p['method'].toString(),
+                              _paymentMethodLabel(p['method']),
                               style: const TextStyle(
                                 color: kWhite,
                                 fontSize: 12,
@@ -1069,20 +1580,19 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
     return _card(
       title: 'MI ASISTENCIA',
       icon: Icons.event_available_rounded,
-      color: kPurple,
+      color: kGreen,
       child: Column(
         children: [
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: kPurple.withValues(alpha: .10),
+              color: kGreen.withValues(alpha: .10),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: kPurple.withValues(alpha: .30)),
+              border: Border.all(color: kGreen.withValues(alpha: .30)),
             ),
             child: Row(
               children: [
-                const Icon(Icons.emoji_events_rounded,
-                    color: kPurple, size: 22),
+                const Icon(Icons.emoji_events_rounded, color: kGreen, size: 22),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
@@ -1109,7 +1619,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
           else
             ..._checkins.take(10).map((c) {
               final isEntrada = c['type'] == 'ENTRADA';
-              final color = isEntrada ? kGreen : kYellow;
+              final color = isEntrada ? kGreen : kMuted;
               return Container(
                 margin: const EdgeInsets.only(bottom: 6),
                 padding: const EdgeInsets.all(10),
@@ -1162,7 +1672,7 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: kPanel,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         border: Border.all(color: kBorder),
       ),
       child: Column(
@@ -1180,13 +1690,16 @@ class _ClientProfileScreenState extends State<ClientProfileScreen> {
                 child: Icon(icon, color: color, size: 16),
               ),
               const SizedBox(width: 10),
-              Text(
-                title,
-                style: const TextStyle(
-                  color: kWhite,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 1.2,
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    color: kWhite,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],

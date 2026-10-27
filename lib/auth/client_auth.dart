@@ -436,7 +436,7 @@ class _ClientRegisterScreenState extends State<ClientRegisterScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Únete al gym',
+                  'Únete al gimnasio',
                   style: TextStyle(
                     color: kWhite,
                     fontSize: 26,
@@ -548,7 +548,7 @@ class _ClientRegisterScreenState extends State<ClientRegisterScreen> {
                       SizedBox(width: 10),
                       Expanded(
                         child: Text(
-                          'Tu cuenta quedará PENDIENTE hasta que el admin confirme tu pago.',
+                          'Tu cuenta quedará PENDIENTE hasta que el administrador confirme tu pago.',
                           style: TextStyle(
                             color: kWhite,
                             fontSize: 11,
