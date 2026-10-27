@@ -24,6 +24,9 @@ import 'home_mobile.dart';
 
 enum UserRole { none, admin, client }
 
+const Color _dashboardAccent = Color(0xFFFFD54F);
+const Color _clientLoginAccent = Color(0xFF448AFF);
+
 class GymCommandCenter extends StatefulWidget {
   const GymCommandCenter({super.key});
   @override
@@ -3077,12 +3080,15 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                             onPressed: () async {
                               await _pickHistoryDate();
                               setModalState(() {
-                                if (type == 'ENTRADAS')
+                                if (type == 'ENTRADAS') {
                                   dataList = todayEntriesList;
-                                if (type == 'SALIDAS')
+                                }
+                                if (type == 'SALIDAS') {
                                   dataList = todayExitsList;
-                                if (type == 'BLOQUEADOS')
+                                }
+                                if (type == 'BLOQUEADOS') {
                                   dataList = todayBlockedList;
+                                }
                               });
                             },
                             icon: Icon(Icons.calendar_month_rounded,
@@ -3095,11 +3101,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                             if (type == 'DENTRO') await loadInsidePeople();
                             setModalState(() {
                               if (type == 'DENTRO') dataList = insidePeople;
-                              if (type == 'ENTRADAS')
+                              if (type == 'ENTRADAS') {
                                 dataList = todayEntriesList;
+                              }
                               if (type == 'SALIDAS') dataList = todayExitsList;
-                              if (type == 'BLOQUEADOS')
+                              if (type == 'BLOQUEADOS') {
                                 dataList = todayBlockedList;
+                              }
                             });
                           },
                           icon: Icon(Icons.refresh_rounded,
@@ -4172,8 +4180,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                           value: value, child: Text(value));
                     }).toList(),
                     onChanged: (value) {
-                      if (value != null)
+                      if (value != null) {
                         setDialogState(() => memberName = value);
+                      }
                     },
                   ),
                   const SizedBox(height: 12),
@@ -6280,7 +6289,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   }
 
   Widget _mobileDrawer() {
-    final primaryColor = context.colors.green;
+    const primaryColor = _dashboardAccent;
     final textWhite = context.colors.white;
     final textMuted = context.colors.muted;
 
@@ -6306,7 +6315,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                                 offset: const Offset(0, 5))
                           ]),
                       child: const Icon(Icons.bolt_rounded,
-                          color: Colors.white, size: 30)),
+                          color: Colors.black, size: 30)),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -6345,7 +6354,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.grid_view_rounded,
                       title: 'Centro de operaciones',
                       subtitle: 'Resumen general del gimnasio',
-                      color: Colors.blueAccent,
+                      color: primaryColor,
                       isSelected: _section == 0,
                       onTap: () {
                         _goToSection(0);
@@ -6355,7 +6364,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.people_alt_rounded,
                       title: 'Clientes',
                       subtitle: 'Gestión de miembros',
-                      color: Colors.greenAccent,
+                      color: primaryColor,
                       isSelected: _section == 1,
                       onTap: () {
                         _goToSection(1);
@@ -6365,7 +6374,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.qr_code_scanner_rounded,
                       title: 'Acceso QR',
                       subtitle: 'Control de entradas y salidas',
-                      color: Colors.cyanAccent,
+                      color: primaryColor,
                       isSelected: _section == 2,
                       onTap: () {
                         _goToSection(2);
@@ -6375,7 +6384,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.card_membership_rounded,
                       title: 'Membresías',
                       subtitle: 'Planes y suscripciones',
-                      color: Colors.orangeAccent,
+                      color: primaryColor,
                       isSelected: _section == 3,
                       onTap: () {
                         _goToSection(3);
@@ -6385,7 +6394,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.payments_rounded,
                       title: 'Finanzas',
                       subtitle: 'Ingresos y estadísticas',
-                      color: Colors.purpleAccent,
+                      color: primaryColor,
                       isSelected: _section == 4,
                       onTap: () {
                         _goToSection(4);
@@ -6395,7 +6404,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.fitness_center_rounded,
                       title: 'Entrenamiento',
                       subtitle: 'Clases, rutinas y entrenadores',
-                      color: Colors.pinkAccent,
+                      color: primaryColor,
                       isSelected: _section == 5,
                       onTap: () {
                         _goToSection(5);
@@ -6405,7 +6414,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.notifications_active_rounded,
                       title: 'Alertas',
                       subtitle: 'Notificaciones pendientes',
-                      color: Colors.redAccent,
+                      color: primaryColor,
                       isSelected: _section == 6,
                       badgeCount: alertCount(context) + renewalRequests.length,
                       onTap: () {
@@ -6416,7 +6425,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.history_rounded,
                       title: 'Historial de accesos',
                       subtitle: 'Entradas, salidas y bloqueos',
-                      color: Colors.lightGreenAccent,
+                      color: primaryColor,
                       isSelected: _section == 8,
                       onTap: () {
                         _goToSection(8);
@@ -6426,7 +6435,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       icon: Icons.settings_rounded,
                       title: 'Configuración',
                       subtitle: 'Ajustes generales',
-                      color: Colors.grey,
+                      color: primaryColor,
                       isSelected: _section == 7,
                       onTap: () {
                         _goToSection(7);
@@ -6442,8 +6451,8 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 10),
                           child: Row(children: [
-                            const Icon(Icons.warning_amber_rounded,
-                                color: Colors.orange, size: 14),
+                            Icon(Icons.warning_amber_rounded,
+                                color: primaryColor, size: 14),
                             const SizedBox(width: 4),
                             Text('Ajustes de Sistema',
                                 style: TextStyle(
@@ -6465,7 +6474,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       title:
                           themeController.isDark ? 'Modo Claro' : 'Modo Oscuro',
                       subtitle: 'Cambiar la apariencia',
-                      color: Colors.yellow,
+                      color: primaryColor,
                       onTap: () {
                         themeController.toggle();
                         Navigator.pop(context);
@@ -6475,7 +6484,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       title: 'Cerrar Sesión',
                       subtitle: 'Salir del sistema',
                       color: primaryColor,
-                      isDanger: true,
                       onTap: () {
                         Navigator.pop(context);
                         confirmLogout();
@@ -6488,8 +6496,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.shield_rounded,
-                      color: context.colors.green, size: 16),
+                  Icon(Icons.shield_rounded, color: primaryColor, size: 16),
                   const SizedBox(width: 8),
                   Text('Sistema Operativo v1.0',
                       style: TextStyle(
@@ -6501,12 +6508,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       width: 8,
                       height: 8,
                       decoration: BoxDecoration(
-                          color: context.colors.green,
+                          color: primaryColor,
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
-                                color:
-                                    context.colors.green.withValues(alpha: 0.5),
+                                color: primaryColor.withValues(alpha: 0.5),
                                 blurRadius: 6)
                           ])),
                 ],
@@ -6525,7 +6531,6 @@ class _GymCommandCenterState extends State<GymCommandCenter>
       required Color color,
       required VoidCallback onTap,
       bool isSelected = false,
-      bool isDanger = false,
       int badgeCount = 0}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -6540,16 +6545,12 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             decoration: BoxDecoration(
               color: isSelected
                   ? color.withValues(alpha: 0.1)
-                  : (isDanger
-                      ? context.colors.red.withValues(alpha: 0.05)
-                      : Colors.transparent),
+                  : Colors.transparent,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
                   color: isSelected
                       ? color.withValues(alpha: 0.3)
-                      : (isDanger
-                          ? context.colors.red.withValues(alpha: 0.2)
-                          : Colors.transparent)),
+                      : Colors.transparent),
             ),
             child: Row(
               children: [
@@ -6559,9 +6560,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                     decoration: BoxDecoration(
                         color: color.withValues(alpha: 0.15),
                         shape: BoxShape.circle),
-                    child: Icon(icon,
-                        color: isDanger ? context.colors.red : color,
-                        size: 22)),
+                    child: Icon(icon, color: color, size: 22)),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Column(
@@ -6569,9 +6568,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                     children: [
                       Text(title,
                           style: TextStyle(
-                              color: isDanger
-                                  ? context.colors.red
-                                  : context.colors.white,
+                              color: context.colors.white,
                               fontSize: 14,
                               fontWeight: FontWeight.w800)),
                       const SizedBox(height: 2),
@@ -6586,7 +6583,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       padding: const EdgeInsets.symmetric(
                           horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
-                          color: context.colors.red,
+                          color: color,
                           borderRadius: BorderRadius.circular(12)),
                       child: Text('$badgeCount',
                           style: const TextStyle(
@@ -6617,7 +6614,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                   child: loadingData
                       ? Center(
                           child: CircularProgressIndicator(
-                              color: context.colors.red))
+                              color: _dashboardAccent))
                       : _content()),
             ],
           ),
@@ -6649,10 +6646,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                      color: context.colors.red,
+                      color: _dashboardAccent,
                       borderRadius: BorderRadius.circular(13)),
                   child: const Icon(Icons.bolt_rounded,
-                      color: Colors.white, size: 27)),
+                      color: Colors.black, size: 27)),
               const SizedBox(width: 12),
               Expanded(
                   child: Text('SYNTHETIX\nGYM OS PRO',
@@ -6685,18 +6682,18 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                             horizontal: 14, vertical: 14),
                         decoration: BoxDecoration(
                             color: selected
-                                ? context.colors.red.withValues(alpha: .13)
+                                ? _dashboardAccent.withValues(alpha: .13)
                                 : Colors.transparent,
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
                                 color: selected
-                                    ? context.colors.red.withValues(alpha: .45)
+                                    ? _dashboardAccent.withValues(alpha: .45)
                                     : Colors.transparent)),
                         child: Row(
                           children: [
                             Icon(items[index][0] as IconData,
                                 color: selected
-                                    ? context.colors.red
+                                    ? _dashboardAccent
                                     : context.colors.muted,
                                 size: 21),
                             const SizedBox(width: 13),
@@ -6714,11 +6711,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 7, vertical: 3),
                                   decoration: BoxDecoration(
-                                      color: context.colors.red,
+                                      color: _dashboardAccent,
                                       borderRadius: BorderRadius.circular(20)),
                                   child: Text('$ac',
                                       style: const TextStyle(
-                                          color: Colors.white,
+                                          color: Colors.black,
                                           fontSize: 10,
                                           fontWeight: FontWeight.w900))),
                           ],
@@ -6747,7 +6744,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                       themeController.isDark
                           ? Icons.light_mode_rounded
                           : Icons.dark_mode_rounded,
-                      color: context.colors.red,
+                      color: _dashboardAccent,
                       size: 20),
                   const SizedBox(width: 10),
                   Expanded(
@@ -6769,18 +6766,17 @@ class _GymCommandCenterState extends State<GymCommandCenter>
               child: Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                    color: context.colors.red.withValues(alpha: .10),
+                    color: _dashboardAccent.withValues(alpha: .10),
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(
-                        color: context.colors.red.withValues(alpha: .30))),
+                        color: _dashboardAccent.withValues(alpha: .30))),
                 child: Row(children: [
-                  Icon(Icons.logout_rounded,
-                      color: context.colors.red, size: 20),
+                  Icon(Icons.logout_rounded, color: _dashboardAccent, size: 20),
                   const SizedBox(width: 10),
                   Expanded(
                       child: Text('CERRAR SESIÓN',
                           style: TextStyle(
-                              color: context.colors.red,
+                              color: _dashboardAccent,
                               fontSize: 12,
                               fontWeight: FontWeight.w900,
                               letterSpacing: 0.5))),
@@ -9718,7 +9714,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 shape: BoxShape.circle,
                 gradient: RadialGradient(
                   colors: [
-                    context.colors.red.withValues(alpha: .18),
+                    _dashboardAccent.withValues(alpha: .18),
                     Colors.transparent,
                   ],
                 ),
@@ -9735,7 +9731,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 shape: BoxShape.circle,
                 gradient: RadialGradient(
                   colors: [
-                    context.colors.blue.withValues(alpha: .15),
+                    _clientLoginAccent.withValues(alpha: .15),
                     Colors.transparent,
                   ],
                 ),
@@ -9774,6 +9770,9 @@ class _GymCommandCenterState extends State<GymCommandCenter>
   }
 
   Widget _loginContent() {
+    const adminAccent = _dashboardAccent;
+    const clientAccent = _clientLoginAccent;
+
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -9784,7 +9783,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             icon: Icons.shield_rounded,
             title: 'ADMINISTRADOR',
             subtitle: 'Acceso con PIN de seguridad',
-            color: context.colors.red,
+            color: adminAccent,
             onTap: () => setState(() => loginScreen = 'admin'),
           ),
           const SizedBox(height: 14),
@@ -9792,7 +9791,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             icon: Icons.person_rounded,
             title: 'CLIENTE',
             subtitle: 'Ingresa con tu cédula',
-            color: context.colors.blue,
+            color: clientAccent,
             onTap: () => setState(() => loginScreen = 'client'),
           ),
         ] else if (loginScreen == 'admin') ...[
@@ -9800,16 +9799,17 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             icon: Icons.shield_rounded,
             title: 'ACCESO ADMIN',
             subtitle: 'Ingresa tu PIN de 4 dígitos',
-            color: context.colors.red,
+            color: adminAccent,
           ),
           const SizedBox(height: 32),
           _pinInput(),
           const SizedBox(height: 24),
           _primaryButton(
             text: isPinLocked ? 'BLOQUEADO ${pinLockSecondsLeft}s' : 'INGRESAR',
-            color: context.colors.red,
+            color: adminAccent,
             onTap: isPinLocked ? null : tryAdminLogin,
             icon: Icons.arrow_forward_rounded,
+            darkText: true,
           ),
           const SizedBox(height: 16),
           _backLink(() => setState(() => loginScreen = 'choose')),
@@ -9818,7 +9818,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             icon: Icons.person_rounded,
             title: 'ACCESO CLIENTE',
             subtitle: 'Ingresa con tu número de cédula',
-            color: context.colors.blue,
+            color: clientAccent,
           ),
           const SizedBox(height: 32),
           _textInputField(
@@ -9827,14 +9827,15 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             hint: 'Ej: 12345678',
             icon: Icons.badge_rounded,
             keyboard: TextInputType.number,
-            accentColor: context.colors.blue,
+            accentColor: clientAccent,
           ),
           const SizedBox(height: 24),
           _primaryButton(
             text: 'INGRESAR',
-            color: context.colors.blue,
+            color: clientAccent,
             onTap: tryClientLogin,
             icon: Icons.arrow_forward_rounded,
+            darkText: true,
           ),
           const SizedBox(height: 24),
           Row(
@@ -9870,14 +9871,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 color: context.colors.panel2,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                    color: context.colors.blue.withValues(alpha: .45),
-                    width: 1.5),
+                    color: clientAccent.withValues(alpha: .45), width: 1.5),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(Icons.person_add_alt_1_rounded,
-                      color: context.colors.blue, size: 20),
+                      color: clientAccent, size: 20),
                   const SizedBox(width: 10),
                   Flexible(
                     child: RichText(
@@ -9893,10 +9893,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                           TextSpan(
                             text: 'Regístrate aquí',
                             style: TextStyle(
-                              color: context.colors.blue,
+                              color: clientAccent,
                               fontWeight: FontWeight.w900,
                               decoration: TextDecoration.underline,
-                              decorationColor: context.colors.blue,
+                              decorationColor: clientAccent,
                             ),
                           ),
                         ],
@@ -9914,7 +9914,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             icon: Icons.rocket_launch_rounded,
             title: 'CREAR CUENTA',
             subtitle: 'Únete a Synthetix Gym OS',
-            color: context.colors.green,
+            color: clientAccent,
           ),
           const SizedBox(height: 32),
           Align(
@@ -9935,7 +9935,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             label: 'Nombre completo',
             hint: 'Ej: Juan Pérez',
             icon: Icons.person_rounded,
-            accentColor: context.colors.green,
+            accentColor: clientAccent,
           ),
           const SizedBox(height: 12),
           _textInputField(
@@ -9944,7 +9944,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             hint: 'Ej: 12345678',
             icon: Icons.badge_rounded,
             keyboard: TextInputType.number,
-            accentColor: context.colors.green,
+            accentColor: clientAccent,
           ),
           const SizedBox(height: 12),
           _textInputField(
@@ -9953,7 +9953,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             hint: 'Ej: +58 412 1234567',
             icon: Icons.phone_rounded,
             keyboard: TextInputType.phone,
-            accentColor: context.colors.green,
+            accentColor: clientAccent,
           ),
           const SizedBox(height: 28),
           Align(
@@ -9961,7 +9961,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
             child: Row(
               children: [
                 Icon(Icons.card_membership_rounded,
-                    color: context.colors.green, size: 16),
+                    color: clientAccent, size: 16),
                 const SizedBox(width: 8),
                 Text(
                   'SELECCIONA TU PLAN',
@@ -9999,7 +9999,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           const SizedBox(height: 24),
           _primaryButton(
             text: regLoading ? 'ENVIANDO...' : 'ENVIAR REGISTRO',
-            color: context.colors.green,
+            color: clientAccent,
             onTap: regLoading ? null : tryClientRegister,
             icon: Icons.send_rounded,
             darkText: true,
@@ -10013,11 +10013,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
               color: context.colors.panel,
               borderRadius: BorderRadius.circular(24),
               border: Border.all(
-                  color: context.colors.green.withValues(alpha: .45),
-                  width: 1.5),
+                  color: clientAccent.withValues(alpha: .45), width: 1.5),
               boxShadow: [
                 BoxShadow(
-                  color: context.colors.green.withValues(alpha: .12),
+                  color: clientAccent.withValues(alpha: .12),
                   blurRadius: 40,
                 ),
               ],
@@ -10028,14 +10027,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                   width: 90,
                   height: 90,
                   decoration: BoxDecoration(
-                    color: context.colors.green.withValues(alpha: .12),
+                    color: clientAccent.withValues(alpha: .12),
                     shape: BoxShape.circle,
                     border: Border.all(
-                        color: context.colors.green.withValues(alpha: .35),
-                        width: 2),
+                        color: clientAccent.withValues(alpha: .35), width: 2),
                   ),
                   child: Icon(Icons.check_circle_rounded,
-                      color: context.colors.green, size: 50),
+                      color: clientAccent, size: 50),
                 ),
                 const SizedBox(height: 22),
                 Text(
@@ -10058,7 +10056,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 const SizedBox(height: 24),
                 _primaryButton(
                   text: 'VOLVER AL INICIO',
-                  color: context.colors.green,
+                  color: clientAccent,
                   onTap: () => setState(() => loginScreen = 'choose'),
                   icon: Icons.home_rounded,
                   darkText: true,
@@ -10078,11 +10076,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           width: 88,
           height: 88,
           decoration: BoxDecoration(
-            color: context.colors.red,
+            color: _dashboardAccent,
             borderRadius: BorderRadius.circular(24),
             boxShadow: [
               BoxShadow(
-                color: context.colors.red.withValues(alpha: .45),
+                color: _dashboardAccent.withValues(alpha: .45),
                 blurRadius: 35,
                 spreadRadius: 2,
               ),
@@ -10254,7 +10252,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide(color: context.colors.red, width: 2),
+          borderSide: BorderSide(color: _dashboardAccent, width: 2),
         ),
       ),
     );
@@ -10321,11 +10319,11 @@ class _GymCommandCenterState extends State<GymCommandCenter>
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             color: isSelected
-                ? context.colors.red.withValues(alpha: .12)
+                ? _clientLoginAccent.withValues(alpha: .12)
                 : context.colors.panel2,
             borderRadius: BorderRadius.circular(16),
             border: Border.all(
-              color: isSelected ? context.colors.red : context.colors.border,
+              color: isSelected ? _clientLoginAccent : context.colors.border,
               width: isSelected ? 2 : 1.2,
             ),
           ),
@@ -10335,13 +10333,13 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 width: 46,
                 height: 46,
                 decoration: BoxDecoration(
-                  color: context.colors.red.withValues(alpha: .15),
+                  color: _clientLoginAccent.withValues(alpha: .15),
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                      color: context.colors.red.withValues(alpha: .35)),
+                      color: _clientLoginAccent.withValues(alpha: .35)),
                 ),
                 child: Icon(Icons.card_membership_rounded,
-                    color: context.colors.red, size: 24),
+                    color: _clientLoginAccent, size: 24),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -10375,7 +10373,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                   Text(
                     formatPrice(price),
                     style: TextStyle(
-                      color: context.colors.red,
+                      color: _clientLoginAccent,
                       fontSize: 18,
                       fontWeight: FontWeight.w900,
                       height: 1,
@@ -10400,10 +10398,10 @@ class _GymCommandCenterState extends State<GymCommandCenter>
                 height: 24,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: isSelected ? context.colors.red : Colors.transparent,
+                  color: isSelected ? _clientLoginAccent : Colors.transparent,
                   border: Border.all(
                     color:
-                        isSelected ? context.colors.red : context.colors.border,
+                        isSelected ? _clientLoginAccent : context.colors.border,
                     width: 2,
                   ),
                 ),
@@ -11740,6 +11738,7 @@ class _GymCommandCenterState extends State<GymCommandCenter>
     return _dashboardContent();
   }
 
+  @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
